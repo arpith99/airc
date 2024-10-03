@@ -1,0 +1,50 @@
+ Aim:
+    To write an IRC client that can connect to an IRC server, join a channel, send and receive messages, request and accept DCC file transfers, and disconnect from the server.
+
+First steps:
+    1. Write a program that can connect to an IRC server.
+    2. Write a program that can join a channel.
+    3. Write a program that can send a message.
+    4. Write a program that can receive a message.
+    5. Write a program that can request a DCC file transfer.
+    6. Write a program that can accept a DCC file transfer.
+    7. Write a program that can disconnect from an IRC server.
+
+Requirements:
+    1. Connect to IRC server
+    2. Join a channel
+    3. Send a message
+    4. Receive a message
+    6. Request a DCC file transfer
+    7. Accept a DCC file transfer
+    8. Disconnect from IRC server
+
+Design:
+    1. Create a class to represent an IRC client.
+    2. Create a class to represent a user.
+    3. Create a class to represent a book.
+    4. Create a class to represent a DCC file transfer.
+    5. Create a class to represent a message.
+    6. Create a class to represent a channel.
+    7. Create a class to represent an IRC server.
+    8. Create a class to represent a search.
+    9. Create a class to represent a list of results.
+    10. Create a class to represent a list of books.
+    11. Create a class to represent a list of users.
+    12. Create a class to represent a list of channels.
+    13. Create a class to represent a list of servers.
+    14. Create a class to represent a list of messages.
+    15. Create a class to represent a list of DCC file transfers.
+    16. Create a class to represent a list of searches.
+
+Notes:
+    - The IRC client will be a command-line interface.
+    - The user will be able to enter commands to interact with the IRC client.
+    - The IRC client will handle the user's commands and interact with the IRC server accordingly.
+    - The IRC client will be able to connect to multiple IRC servers and join multiple channels.
+    - The IRC client will be able to send and receive messages in multiple channels.
+    - The IRC client will be able to request and accept DCC file transfers.
+    - The IRC client will be able to disconnect from an IRC server.
+    - The IRC client will be able to search for books and display the results to the user.
+    - The IRC client will be able to request a DCC file transfer for a selected book.
+
