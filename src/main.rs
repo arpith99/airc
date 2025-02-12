@@ -14,16 +14,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let stream = TcpStream::connect(format!("{}:6667", server)).await?;
 
     let (sender, mut receiver): (Sender<String>, Receiver<String>) = mpsc::channel(100);
+    let init_sender = sender.clone();
+    let pong_sender = sender.clone();
 
     let (mut reader, mut writer) = stream.into_split();
 
+    let init_task = tokio::spawn(async move {
+        init_sender.send(format!("CAP LS\r\n")).await?;
+        init_sender.send(format!("NICK {}\r\n", nickname)).await?;
+        init_sender.send(format!("USER {} {} {} :{}\r\n", username, nickname, server, realname)).await?;
+        init_sender.send(format!("JOIN {}\r\n", channel)).await?;
+        Ok::<_, Box<dyn Error + Send + Sync>>(())
+    });
+
     let write_task = tokio::spawn(async move {
-        writer.write_all(format!("CAP LS\r\n").as_bytes()).await?;
-        writer.write_all(format!("NICK {}\r\n", nickname).as_bytes()).await?;
-        writer.write_all(format!("USER {} {} {} :{}\r\n", username, nickname, server, realname).as_bytes()).await?;
-        writer.write_all(format!("JOIN {}\r\n", channel).as_bytes()).await?;
-        while let Some(pong) = receiver.recv().await {
-            writer.write_all(format!("{}\r\n", pong).as_bytes()).await?;
+        while let Some(receive) = receiver.recv().await {
+            writer.write_all(format!("{}\r\n", receive).as_bytes()).await?;
         }
         Ok::<_, Box<dyn Error + Send + Sync>>(())
     });
@@ -42,13 +48,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             if line.starts_with("PING") {
                 let pong = line.replace("PING", "PONG");
-                sender.send(pong).await?;
+                pong_sender.send(pong).await?;
             }
         }
         Ok::<_, Box<dyn Error + Send + Sync>>(())
     });
 
-    let _ = tokio::try_join!(write_task, read_task)?;
+    let _ = tokio::join!(init_task, write_task, read_task);
 
     Ok(())
 }
