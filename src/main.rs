@@ -2,9 +2,11 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc::{self, Sender, Receiver};
+use std::process::exit;
 use std::error::Error;
 use std::sync::Arc;
 use std::io::{Write, stdout};
+use async_std::io::stdin;
 use rand::Rng;
 use colored::Colorize;
 
@@ -45,23 +47,59 @@ async fn init(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
     client.sender.send(format!("CAP LS\r\n")).await?;
     client.sender.send(format!("NICK {}\r\n", client.nickname)).await?;
     client.sender.send(format!("USER {} {} {} :{}\r\n", client.username, client.nickname, client.server, client.realname)).await?;
-    //client.sender.send(format!("JOIN {}\r\n", client.channel)).await?;
     Ok(())
 }
 
 async fn write(client: Arc<IrcClient>, mut receiver: Receiver<String>) -> Result<(), Box<dyn Error + Send + Sync>> {
     while let Some(message) = receiver.recv().await {
         let mut writer = client.writer.lock().await;
+        print_sent_line(&message);
         writer.write_all(format!("{}", message).as_bytes()).await?;
+        if message.starts_with("QUIT") {
+            println!("Exiting...");
+            println!("Goodbye!");
+            exit(0);
+        }
     }
     Ok(())
 }
 
+async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut command = String::new();
+    while 0 != stdin().read_line(&mut command).await? {
+        match command.trim() {
+            "/join" | "/j" => {
+                let message = format!("JOIN {}\r\n", client.channel);
+                client.sender.send(message).await?;
+            },
+            "/quit" | "/q"=> {
+                let message = format!("QUIT\r\n");
+                client.sender.send(message).await?;
+            },
+            _ => {
+                let message = format!("{}\r\n", command[1..].trim());    /* Strip the leading '/' */
+                client.sender.send(message).await?;
+            }
+        }
+        command.clear();
+    }
+    Ok(())
+}
+
+fn print_sent_line(line: &str) {
+    print!("{}", format!("{}: ", "TX").red());
+    print_line(line);
+}
+
 fn print_received_line(line: &str) {
+    print!("{}", format!("{}: ", "RX").green());
+    print_line(line);
+}
+
+fn print_line(line: &str) {
     let colon_index = line.find(" :").unwrap_or(0);
     let prefix = &line[..colon_index];
     let message = &line[colon_index..];
-    print!("{}", format!("RX: ").green());
     print!("{}", format!("{}", prefix).yellow());
     print!("{}", format!("{}", message).white());
     stdout().flush().unwrap();
@@ -105,13 +143,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let init_task = tokio::spawn(init(client.clone()));
     let write_task = tokio::spawn(write(client.clone(), receiver));
+    let cli_task = tokio::spawn(cli(client.clone()));
     let read_task = tokio::spawn(read(client.clone()));
 
-    let (init_result, write_result, read_result) = tokio::join!(init_task, write_task, read_task);
+    let (init_result, write_result, cli_result, read_result) = tokio::join!(init_task, write_task, cli_task, read_task);
     
     // Propagate any errors from the tasks
     init_result??;
     write_result??;
+    cli_result??;
     read_result??;
 
     Ok(())
