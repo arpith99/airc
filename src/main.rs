@@ -9,6 +9,7 @@ use std::io::{Write, stdout};
 use async_std::io::stdin;
 use rand::Rng;
 use colored::Colorize;
+use regex::Regex;
 
 #[derive(Clone)]
 struct IrcClient {
@@ -64,6 +65,17 @@ async fn write(client: Arc<IrcClient>, mut receiver: Receiver<String>) -> Result
     Ok(())
 }
 
+fn process_command(client: Arc<IrcClient>, command: &str) -> String {
+    let re = Regex::new(r"/s(earch)? (?P<search_term>.*)").unwrap();
+    if let Some(caps) = re.captures(command) {
+        let search_term = caps.name("search_term").unwrap().as_str();
+        println!("Searching for: {}", search_term);
+        return format!("PRIVMSG {} :@search {}\r\n", client.channel, search_term);
+    };
+    let message = format!("{}\r\n", command[1..].trim());    /* Strip the leading '/' */
+    return message;
+}
+
 async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut command = String::new();
     while 0 != stdin().read_line(&mut command).await? {
@@ -77,7 +89,7 @@ async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>>
                 client.sender.send(message).await?;
             },
             _ => {
-                let message = format!("{}\r\n", command[1..].trim());    /* Strip the leading '/' */
+                let message = process_command(client.clone(), &command);
                 client.sender.send(message).await?;
             }
         }
