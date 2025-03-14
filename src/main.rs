@@ -10,6 +10,7 @@ use async_std::io::stdin;
 use rand::Rng;
 use colored::Colorize;
 use regex::Regex;
+use clap::Parser;
 
 #[derive(Clone)]
 struct IrcClient {
@@ -21,6 +22,19 @@ struct IrcClient {
     reader: Arc<tokio::sync::Mutex<BufReader<OwnedReadHalf>>>,
     writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
     sender: Sender<String>,
+}
+
+#[derive(Parser, Debug)]
+struct Args {
+    /// The IRC server to connect to
+    #[clap(short, long)]
+    server: Option<String>,
+    /// The IRC channel to join
+    #[clap(short, long)]
+    channel: Option<String>,
+    /// The username to use
+    #[clap(short, long)]
+    username: Option<String>,
 }
 
 impl IrcClient {
@@ -140,17 +154,43 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut rng = rand::rng();
+    let server: String;
+    let channel: String;
+    let username: String;
+    let nickname: String;
+    let realname: String;
+    let args = Args::parse();
 
-    let mut random_nickname: String = String::from("bworm");
-    random_nickname.push_str(rng.random_range(0..=99999).to_string().as_str());
+    if args.server.is_none() {
+        server = "irc.undernet.org".to_string();
+    }
+    else {
+        server = args.server.clone().unwrap();
+    }
+    if args.channel.is_none() {
+        channel = "#bookz".to_string();
+    } else {
+        channel = args.channel.clone().unwrap();
+    }
+    if args.username.is_none() {
+        let mut rng = rand::rng();
+        let mut random_nickname: String = String::from("bworm");
+        random_nickname.push_str(rng.random_range(0..=99999).to_string().as_str());
+        username = random_nickname.clone();
+        nickname = random_nickname.clone();
+        realname = "Book Worm".to_string();
+    } else {
+        username = args.username.clone().unwrap();
+        nickname = args.username.clone().unwrap();
+        realname = args.username.clone().unwrap();
+    }
 
     let (client, receiver) = IrcClient::new(
-        "irc.undernet.org", 
-        "#bookz", 
-        &random_nickname, 
-        &random_nickname, 
-        "Book Worm"
+        &server,
+        &channel,
+        &username,
+        &nickname,
+        &realname,
     ).await?;
 
     let init_task = tokio::spawn(init(client.clone()));
