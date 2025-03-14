@@ -131,6 +131,19 @@ fn print_line(line: &str) {
     stdout().flush().unwrap();
 }
 
+async fn process_dcc_send(line: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let re = Regex::new(r".*DCC SEND (?P<filename>.*) (?P<ip>.*) (?P<port>.*) (?P<size>.*)").unwrap();
+    if let Some(caps) = re.captures(&line) {
+        let filename = caps.name("filename").unwrap().as_str();
+        let ip = caps.name("ip").unwrap().as_str();
+        let port = caps.name("port").unwrap().as_str();
+        let size = caps.name("size").unwrap().as_str();
+        println!("Received DCC SEND request for file: {}", filename);
+        println!("IP: {}, Port: {}, Size: {}", ip, port, size);
+    }
+    Ok(())
+}
+
 async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
         let mut line = String::new();
@@ -147,6 +160,9 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
         if line.starts_with("PING") {
             let pong = line.replace("PING", "PONG");
             client.sender.send(pong).await?;
+        }
+        if line.contains("DCC SEND") {
+            process_dcc_send(&line).await?;
         }
     }
     Ok(())
