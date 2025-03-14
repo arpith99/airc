@@ -1,16 +1,19 @@
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncWriteExt, AsyncReadExt, AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc::{self, Sender, Receiver};
 use std::process::exit;
 use std::error::Error;
 use std::sync::Arc;
 use std::io::{Write, stdout};
+use std::fs;
 use async_std::io::stdin;
 use rand::Rng;
 use colored::Colorize;
 use regex::Regex;
 use clap::Parser;
+
+const DOWNLOAD_PATH: &str = "/home/arpith/Downloads/Books/";
 
 #[derive(Clone)]
 struct IrcClient {
@@ -131,6 +134,17 @@ fn print_line(line: &str) {
     stdout().flush().unwrap();
 }
 
+async fn dcc_receive(filename: &str, ip: &str, port: &str, size: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
+    let size: u32 = size[..size.len()-2].to_string().trim().parse().unwrap();    // Strip the trailing '0x01' character and newline
+    let mut buffer = vec![0; size as usize];
+    stream.read_exact(&mut buffer).await?;
+    let fname = format!("{}{}", DOWNLOAD_PATH, filename);
+    fs::write(&fname, &buffer)?;
+    println!("Received file: {:?}", filename);
+    Ok(())
+}
+
 async fn process_dcc_send(line: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let re = Regex::new(r".*DCC SEND (?P<filename>.*) (?P<ip>.*) (?P<port>.*) (?P<size>.*)").unwrap();
     if let Some(caps) = re.captures(&line) {
@@ -140,6 +154,7 @@ async fn process_dcc_send(line: &str) -> Result<(), Box<dyn Error + Send + Sync>
         let size = caps.name("size").unwrap().as_str();
         println!("Received DCC SEND request for file: {}", filename);
         println!("IP: {}, Port: {}, Size: {}", ip, port, size);
+        dcc_receive(filename, ip, port, size).await?;
     }
     Ok(())
 }
