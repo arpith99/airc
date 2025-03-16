@@ -10,4 +10,5 @@ colored = "3.0"
 async-std = "1"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
+zip = "2"
 
