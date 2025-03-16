@@ -5,13 +5,15 @@ use tokio::sync::mpsc::{self, Sender, Receiver};
 use std::process::exit;
 use std::error::Error;
 use std::sync::Arc;
-use std::io::{Write, stdout};
+use std::io::{Write, stdout, copy};
 use std::fs;
+use std::path::PathBuf;
 use async_std::io::stdin;
 use rand::Rng;
 use colored::Colorize;
 use regex::Regex;
 use clap::Parser;
+use zip::ZipArchive;
 
 const DOWNLOAD_PATH: &str = "/home/arpith/Downloads/Books/";
 
@@ -134,6 +136,22 @@ fn print_line(line: &str) {
     stdout().flush().unwrap();
 }
 
+async fn unzip_file(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let file = fs::File::open(filename).unwrap();
+    let mut archive = ZipArchive::new(file).unwrap();
+    let mut file = archive.by_index(0).unwrap();
+    let outpath = PathBuf::from(filename.strip_suffix(".zip").unwrap());
+    let mut outfile = fs::File::create(&outpath).unwrap();
+    println!(
+                "File {} extracted to \"{}\" ({} bytes)",
+                filename,
+                outpath.display(),
+                file.size()
+            );
+    copy(&mut file, &mut outfile).unwrap();
+    Ok(())
+}
+
 async fn dcc_receive(filename: &str, ip: &str, port: &str, size: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
     let size: u32 = size[..size.len()-2].to_string().trim().parse().unwrap();    // Strip the trailing '0x01' character and newline
@@ -142,6 +160,7 @@ async fn dcc_receive(filename: &str, ip: &str, port: &str, size: &str) -> Result
     let fname = format!("{}{}", DOWNLOAD_PATH, filename);
     fs::write(&fname, &buffer)?;
     println!("Received file: {:?}", filename);
+    unzip_file(&fname).await?;
     Ok(())
 }
 
