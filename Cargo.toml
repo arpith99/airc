@@ -11,4 +11,6 @@ async-std = "1"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
 zip = "2"
+ratatui = "0"
+crossterm = "0"
 
