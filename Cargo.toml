@@ -13,4 +13,5 @@ clap = { version = "4", features = ["derive"] }
 zip = "2"
 ratatui = "0"
 crossterm = "0"
+dirs = "6"
 

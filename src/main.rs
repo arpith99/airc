@@ -27,8 +27,10 @@ use regex::Regex;
 use clap::Parser;
 use rand::Rng;
 use zip::ZipArchive;
+use dirs;
 
 const DOWNLOAD_PATH: &str = "/home/arpith/Downloads/Books/";
+const MAX_MESSAGE_HISTORY: usize = 100;
 
 // Command line arguments
 #[derive(Parser, Debug)]
@@ -144,7 +146,9 @@ impl App {
 
     fn add_message(&mut self, message: String) {
         self.messages.push(message);
-        // Auto-scroll to the bottom when a new message arrives
+        if self.messages.len() > MAX_MESSAGE_HISTORY {
+            self.messages.remove(0);
+        }
         self.scroll_to_bottom();
     }
 
@@ -380,7 +384,7 @@ async fn read(client: Arc<IrcClient>, app_sender: Sender<UIMessage>) -> Result<(
 }
 
 async fn process_dcc_send(line: &str, app_sender: Sender<UIMessage>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let re = Regex::new(r".*DCC SEND (?P<filename>.*) (?P<ip>.*) (?P<port>.*) (?P<size>.*)").unwrap();
+    let re = Regex::new(r".*DCC SEND (?P<filename>[^ ]+) (?P<ip>\d+) (?P<port>\d+) (?P<size>\d+)").unwrap();
     if let Some(caps) = re.captures(&line) {
         let filename = caps.name("filename").unwrap().as_str().to_string();
         let ip = caps.name("ip").unwrap().as_str().to_string();
@@ -435,14 +439,12 @@ async fn dcc_receive(filename: &str, ip: &str, port: &str, size: &str, app_sende
     if filename.ends_with(".zip") {
         app_sender.send(UIMessage::Message(format!("Extracting: {}", filename))).await?;
         
-        // Run unzip in a blocking task since it uses std::fs
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = unzip_file(&fname) {
-                eprintln!("Unzip error: {}", e);
+            match unzip_file(&fname) {
+                Ok(()) => app_sender.blocking_send(UIMessage::Message("Extraction complete".into())).ok(),
+                Err(e) => app_sender.blocking_send(UIMessage::Message(format!("Extraction error: {}", e))).ok(),
             }
-        }).await?;
-        
-        app_sender.send(UIMessage::Message(format!("Extraction complete: {}", filename))).await?;
+        });
     }
     
     Ok(())
@@ -456,6 +458,12 @@ fn unzip_file(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut outfile = fs::File::create(&outpath)?;
     copy(&mut file, &mut outfile)?;
     Ok(())
+}
+
+fn get_download_path() -> PathBuf {
+    dirs::download_dir()
+        .unwrap_or_else(|| PathBuf::from("~/Downloads"))
+        .join("Books")
 }
 
 // Messages for UI updates
@@ -509,8 +517,9 @@ async fn run_tui_app() -> Result<(), Box<dyn Error + Send + Sync>> {
                 // Initialize IRC connection
                 let init_client = client.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = init(init_client).await {
-                        eprintln!("Init error: {}", e);
+                    if let Err(e) = init(init_client.clone()).await {
+                        let error_message = format!("Init error: {}", e);
+                        ui_sender.send(UIMessage::Message(error_message)).await.ok();
                     }
                 });
                 
@@ -587,7 +596,7 @@ async fn run_tui_app() -> Result<(), Box<dyn Error + Send + Sync>> {
             terminal.draw(|f| ui(f, &mut app))?;
             
             // Prevent CPU spinning
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         
         // Clean up the terminal
@@ -630,9 +639,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(15), // Server list
-            Constraint::Percentage(70), // Middle section
-            Constraint::Percentage(15), // User list
+            Constraint::Percentage(10), // Server list
+            Constraint::Percentage(80), // Middle section
+            Constraint::Percentage(10), // User list
         ])
         .split(main_area);
 
@@ -864,7 +873,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Ensure download directory exists
-    if let Err(e) = fs::create_dir_all(DOWNLOAD_PATH) {
+    if let Err(e) = fs::create_dir_all(get_download_path()) {
         eprintln!("Error creating download directory: {}", e);
     }
     
