@@ -10,16 +10,16 @@ use tokio::sync::mpsc::{self, Sender, Receiver};
 use tokio::sync::Mutex as TokioMutex;
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEvent, MouseEventKind, MouseButton},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Position},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame, Terminal,
 };
 
@@ -70,9 +70,27 @@ struct App {
     current_channel: String,
     connected: bool,
     irc_sender: Option<Sender<String>>,
-    // New fields for scrolling functionality
+    // Scrolling functionality
     message_scroll: usize,
     max_scroll: usize,
+    // New fields for additional scrolling
+    book_scroll: usize,
+    book_scroll_state: ScrollbarState,
+    user_scroll: usize,
+    user_scroll_state: ScrollbarState,
+    message_scroll_state: ScrollbarState,
+    // Mouse state
+    last_click_position: Option<(u16, u16)>,
+    active_panel: ActivePanel,
+}
+
+// Track which panel is currently active
+#[derive(PartialEq, Clone, Copy)]
+enum ActivePanel {
+    Messages,
+    Books,
+    Users,
+    Input,
 }
 
 // Structure to track download progress
@@ -137,6 +155,14 @@ impl App {
             // Initialize scroll fields
             message_scroll: 0,
             max_scroll: 0,
+            // Initialize new scroll fields
+            book_scroll: 0,
+            book_scroll_state: ScrollbarState::default(),
+            user_scroll: 0,
+            user_scroll_state: ScrollbarState::default(),
+            message_scroll_state: ScrollbarState::default(),
+            last_click_position: None,
+            active_panel: ActivePanel::Input,
         }
     }
 
@@ -194,6 +220,7 @@ impl App {
         } else {
             self.message_scroll = 0;
         }
+        self.update_message_scrollbar();
     }
 
     fn scroll_down(&mut self, amount: usize) {
@@ -202,9 +229,96 @@ impl App {
         } else {
             self.message_scroll = self.max_scroll;
         }
+        self.update_message_scrollbar();
     }
 
-    fn handle_events(&mut self) -> io::Result<()> {
+    fn update_message_scrollbar(&mut self) {
+        self.message_scroll_state = self.message_scroll_state
+            .content_length(self.messages.len())
+            .position(self.message_scroll);
+    }
+
+    // Book list scrolling
+    fn update_book_scroll(&mut self, viewport_height: usize) {
+        let max_scroll = self.book_list.len().saturating_sub(viewport_height);
+        self.book_scroll = self.book_scroll.min(max_scroll);
+        self.book_scroll_state = self.book_scroll_state.content_length(self.book_list.len());
+    }
+    
+    fn scroll_books_up(&mut self, amount: usize) {
+        self.book_scroll = self.book_scroll.saturating_sub(amount);
+        self.book_scroll_state = self.book_scroll_state.position(self.book_scroll);
+    }
+    
+    fn scroll_books_down(&mut self, amount: usize) {
+        let max_scroll = self.book_list.len().saturating_sub(1);
+        self.book_scroll = (self.book_scroll + amount).min(max_scroll);
+        self.book_scroll_state = self.book_scroll_state.position(self.book_scroll);
+    }
+    
+    // User list scrolling
+    fn update_user_scroll(&mut self, viewport_height: usize) {
+        let max_scroll = self.user_list.len().saturating_sub(viewport_height);
+        self.user_scroll = self.user_scroll.min(max_scroll);
+        self.user_scroll_state = self.user_scroll_state.content_length(self.user_list.len());
+    }
+    
+    fn scroll_users_up(&mut self, amount: usize) {
+        self.user_scroll = self.user_scroll.saturating_sub(amount);
+        self.user_scroll_state = self.user_scroll_state.position(self.user_scroll);
+    }
+    
+    fn scroll_users_down(&mut self, amount: usize) {
+        let max_scroll = self.user_list.len().saturating_sub(1);
+        self.user_scroll = (self.user_scroll + amount).min(max_scroll);
+        self.user_scroll_state = self.user_scroll_state.position(self.user_scroll);
+    }
+
+    fn handle_mouse_event(&mut self, event: MouseEvent, areas: &Areas) -> io::Result<()> {
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.last_click_position = Some((event.column, event.row));
+                
+                // Check which area was clicked and set active panel
+                if areas.message_area.contains_point(event.column, event.row) {
+                    self.active_panel = ActivePanel::Messages;
+                } else if areas.book_area.contains_point(event.column, event.row) {
+                    self.active_panel = ActivePanel::Books;
+                } else if areas.user_area.contains_point(event.column, event.row) {
+                    self.active_panel = ActivePanel::Users;
+                } else if areas.input_area.contains_point(event.column, event.row) {
+                    self.active_panel = ActivePanel::Input;
+                    
+                    // Set cursor position based on click in input area
+                    let input_x = event.column.saturating_sub(areas.input_area.x + 1);
+                    self.cursor_position = input_x as usize;
+                    if self.cursor_position > self.input.len() {
+                        self.cursor_position = self.input.len();
+                    }
+                }
+            },
+            MouseEventKind::ScrollDown => {
+                match self.active_panel {
+                    ActivePanel::Messages => self.scroll_down(1),
+                    ActivePanel::Books => self.scroll_books_down(1),
+                    ActivePanel::Users => self.scroll_users_down(1),
+                    _ => {}
+                }
+            },
+            MouseEventKind::ScrollUp => {
+                match self.active_panel {
+                    ActivePanel::Messages => self.scroll_up(1),
+                    ActivePanel::Books => self.scroll_books_up(1),
+                    ActivePanel::Users => self.scroll_users_up(1),
+                    _ => {}
+                }
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_events(&mut self, areas: &Areas) -> io::Result<()> {
         if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -285,9 +399,30 @@ impl App {
                         _ => {}
                     }
                 }
+            } else if let Event::Mouse(mouse) = event::read()? {
+                self.handle_mouse_event(mouse, areas)?;
             }
         }
         Ok(())
+    }
+}
+
+// Struct to hold UI areas for mouse interaction
+struct Areas {
+    message_area: Rect,
+    book_area: Rect,
+    user_area: Rect,
+    input_area: Rect,
+}
+
+// Helper to check if a point is within a rectangle
+trait RectExt {
+    fn contains_point(&self, x: u16, y: u16) -> bool;
+}
+
+impl RectExt for Rect {
+    fn contains_point(&self, x: u16, y: u16) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
     }
 }
 
@@ -574,9 +709,17 @@ async fn run_tui_app() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Main UI loop
     let ui_task = tokio::spawn(async move {
+        // Store UI areas across iterations
+        let mut areas = Areas {
+            message_area: Rect::default(),
+            book_area: Rect::default(),
+            user_area: Rect::default(),
+            input_area: Rect::default(),
+        };
+        
         while !app.should_quit {
             // Process UI events
-            if let Err(e) = app.handle_events() {
+            if let Err(e) = app.handle_events(&areas) {
                 eprintln!("UI event error: {}", e);
                 break;
             }
@@ -592,8 +735,10 @@ async fn run_tui_app() -> Result<(), Box<dyn Error + Send + Sync>> {
                 }
             }
             
-            // Draw UI
-            terminal.draw(|f| ui(f, &mut app))?;
+            // Draw UI and update areas
+            terminal.draw(|f| {
+                areas = ui(f, &mut app);
+            })?;
             
             // Prevent CPU spinning
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -620,7 +765,7 @@ async fn run_tui_app() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-fn ui(f: &mut Frame, app: &mut App) {
+fn ui(f: &mut Frame, app: &mut App) -> Areas {
     let size = f.area();
 
     // First split the screen into main content and footer
@@ -673,6 +818,14 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(footer_area);
 
+    // Save areas for mouse interaction
+    let areas = Areas {
+        message_area: bottom_chunks[2],
+        book_area: middle_chunks[0],
+        user_area: main_chunks[2],
+        input_area: footer_chunks[0],
+    };
+
     // Draw server info
     let server_title = format!("Server: {}", app.current_channel);
     let server_block = Block::default()
@@ -696,13 +849,26 @@ fn ui(f: &mut Frame, app: &mut App) {
         .style(Style::default().fg(Color::Cyan));
     f.render_widget(server_list, main_chunks[0]);
 
-    // Draw book list
+    // Draw book list with scrollbar
     let book_block = Block::default()
         .title("Book list")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::LightYellow));
+        .border_style(if app.active_panel == ActivePanel::Books {
+            Style::default().fg(Color::LightBlue)
+        } else {
+            Style::default().fg(Color::LightYellow)
+        });
     
-    let book_items: Vec<ListItem> = app.book_list
+    // Calculate book viewport
+    let book_viewport_height = middle_chunks[0].height as usize - 2; // Subtract 2 for borders
+    app.update_book_scroll(book_viewport_height);
+    
+    let visible_books = app.book_list.iter()
+        .skip(app.book_scroll)
+        .take(book_viewport_height)
+        .collect::<Vec<_>>();
+    
+    let book_items: Vec<ListItem> = visible_books
         .iter()
         .map(|book| ListItem::new(book.as_str()))
         .collect();
@@ -711,14 +877,46 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(book_block)
         .style(Style::default().fg(Color::LightYellow));
     f.render_widget(book_list, middle_chunks[0]);
+    
+    // Render book scrollbar if there are books
+    if !app.book_list.is_empty() {
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        f.render_stateful_widget(
+            scrollbar,
+            Rect {
+                x: middle_chunks[0].x + middle_chunks[0].width - 1,
+                y: middle_chunks[0].y + 1,
+                width: 1,
+                height: middle_chunks[0].height - 2,
+            },
+            &mut app.book_scroll_state,
+        );
+    }
 
-    // Draw user list
+    // Draw user list with scrollbar
     let user_block = Block::default()
         .title("User list")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(if app.active_panel == ActivePanel::Users {
+            Style::default().fg(Color::LightBlue)
+        } else {
+            Style::default().fg(Color::Red)
+        });
     
-    let user_items: Vec<ListItem> = app.user_list
+    // Calculate user viewport
+    let user_viewport_height = main_chunks[2].height as usize - 2; // Subtract 2 for borders
+    app.update_user_scroll(user_viewport_height);
+    
+    let visible_users = app.user_list.iter()
+        .skip(app.user_scroll)
+        .take(user_viewport_height)
+        .collect::<Vec<_>>();
+    
+    let user_items: Vec<ListItem> = visible_users
         .iter()
         .map(|user| ListItem::new(user.as_str()))
         .collect();
@@ -727,6 +925,25 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(user_block)
         .style(Style::default().fg(Color::Red));
     f.render_widget(user_list, main_chunks[2]);
+    
+    // Render user scrollbar if there are users
+    if !app.user_list.is_empty() {
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        f.render_stateful_widget(
+            scrollbar,
+            Rect {
+                x: main_chunks[2].x + main_chunks[2].width - 1,
+                y: main_chunks[2].y + 1,
+                width: 1,
+                height: main_chunks[2].height - 2,
+            },
+            &mut app.user_scroll_state,
+        );
+    }
 
     // Draw download progress bars (up to 2)
     let downloads = app.downloads.iter().take(2).collect::<Vec<_>>();
@@ -773,12 +990,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(empty_block, bottom_chunks[1]);
     }
 
-    // Draw message log with scrolling
+    // Draw message log with scrollbar
     // Calculate the viewport height for messages
     let message_height = bottom_chunks[2].height as usize - 2; // Subtract 2 for borders
     
     // Update max scroll based on current viewport
     app.update_max_scroll(message_height);
+    app.update_message_scrollbar();
     
     // Calculate visible slice of messages based on scroll position
     let visible_messages = if app.messages.is_empty() {
@@ -812,7 +1030,11 @@ fn ui(f: &mut Frame, app: &mut App) {
     let message_block = Block::default()
         .title(message_title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
+        .border_style(if app.active_panel == ActivePanel::Messages {
+            Style::default().fg(Color::LightBlue)
+        } else {
+            Style::default().fg(Color::Magenta)
+        });
 
     // Convert the visible messages to styled Lines
     let messages: Vec<Line> = visible_messages
@@ -834,12 +1056,35 @@ fn ui(f: &mut Frame, app: &mut App) {
         .wrap(ratatui::widgets::Wrap { trim: true });
 
     f.render_widget(message_paragraph, bottom_chunks[2]);
+    
+    // Render message scrollbar if there are messages
+    if !app.messages.is_empty() {
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        f.render_stateful_widget(
+            scrollbar,
+            Rect {
+                x: bottom_chunks[2].x + bottom_chunks[2].width - 1,
+                y: bottom_chunks[2].y + 1,
+                width: 1,
+                height: bottom_chunks[2].height - 2,
+            },
+            &mut app.message_scroll_state,
+        );
+    }
 
     // Draw input box with cursor
     let input_block = Block::default()
         .title("Input")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
+        .border_style(if app.active_panel == ActivePanel::Input {
+            Style::default().fg(Color::LightBlue)
+        } else {
+            Style::default().fg(Color::Green)
+        });
 
     let input = Paragraph::new(app.input.as_str())
         .style(Style::default().fg(Color::White))
@@ -853,14 +1098,14 @@ fn ui(f: &mut Frame, app: &mut App) {
         y: footer_chunks[0].y + 1,
     });
 
-    // Update help text to include scrolling instructions
+    // Update help text to include scrolling and mouse instructions
     let help_text = vec![
         Span::styled("/join", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": Join channel | "),
         Span::styled("/s query", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": Search books | "),
-        Span::styled("PgUp/PgDn", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(": Scroll | "),
+        Span::styled("Mouse", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(": Click & scroll | "),
         Span::styled("Ctrl+Q", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": Quit"),
     ];
@@ -868,6 +1113,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     let hints = Paragraph::new(Line::from(help_text))
         .style(Style::default().fg(Color::White));
     f.render_widget(hints, footer_chunks[1]);
+    
+    // Return the areas for mouse interaction
+    areas
 }
 
 #[tokio::main]
