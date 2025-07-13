@@ -14,4 +14,12 @@ zip = "2"
 ratatui = "0"
 crossterm = "0"
 dirs = "6"
+log = "0.4"
+env_logger = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+once_cell = "1.19"
 
