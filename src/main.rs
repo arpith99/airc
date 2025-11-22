@@ -1,4 +1,5 @@
 use async_std::io::stdin;
+use chrono::Local;
 use clap::Parser;
 use colored::Colorize;
 use rand::Rng;
@@ -97,8 +98,8 @@ async fn write(
         print_sent_line(&message);
         writer.write_all(format!("{}", message).as_bytes()).await?;
         if message.starts_with("QUIT") {
-            println!("Exiting...");
-            println!("Goodbye!");
+            print_line("Exiting...\n", true);
+            print_line("Goodbye!\n", true);
             exit(0);
         }
     }
@@ -109,7 +110,7 @@ fn process_command(client: Arc<IrcClient>, command: &str) -> String {
     let re = Regex::new(r"/s(earch)? (?P<search_term>.*)").unwrap();
     if let Some(caps) = re.captures(command) {
         let search_term = caps.name("search_term").unwrap().as_str();
-        println!("Searching for: {}", search_term);
+        print_line(&format!("Searching for: {}", search_term), true);
         return format!("PRIVMSG {} :@search {}\r\n", client.channel, search_term);
     } else {
         // TODO Extract string from stored search result line
@@ -140,20 +141,33 @@ async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>>
     Ok(())
 }
 
+fn print_timestamp() {
+    let local = Local::now();
+    print!(
+        "{}",
+        format!("{}", local.format("[%H:%M:%S] ")).bright_black()
+    );
+}
+
 fn print_sent_line(line: &str) {
+    print_timestamp();
     print!("{}", format!("{}: ", "TX").red());
-    print_line(line);
+    print_line(line, false);
 }
 
 fn print_received_line(line: &str) {
+    print_timestamp();
     print!("{}", format!("{}: ", "RX").green());
-    print_line(line);
+    print_line(line, false);
 }
 
-fn print_line(line: &str) {
+fn print_line(line: &str, ts_flag: bool) {
     let colon_index = line.find(" :").unwrap_or(0);
     let prefix = &line[..colon_index];
     let message = &line[colon_index..];
+    if ts_flag {
+        print_timestamp();
+    }
     print!("{}", format!("{}", prefix).yellow());
     print!("{}", format!("{}", message).white());
     stdout().flush().unwrap();
@@ -165,11 +179,14 @@ async fn unzip_file(filename: &str) -> Result<String, Box<dyn Error + Send + Syn
     let mut file = archive.by_index(0).unwrap();
     let outpath = PathBuf::from(filename.strip_suffix(".zip").unwrap());
     let mut outfile = fs::File::create(&outpath).unwrap();
-    println!(
-        "File {} extracted to \"{}\" ({} bytes)",
-        filename,
-        outpath.display(),
-        file.size()
+    print_line(
+        &format!(
+            "File {} extracted to \"{}\" ({} bytes)",
+            filename,
+            outpath.display(),
+            file.size(),
+        ),
+        true,
     );
     copy(&mut file, &mut outfile).unwrap();
     Ok(outpath.to_str().unwrap().to_string())
@@ -187,7 +204,7 @@ async fn dcc_receive(
     stream.read_exact(&mut buffer).await?;
     let fpath = format!("{}{}", DOWNLOAD_PATH, filename);
     fs::write(&fpath, &buffer)?;
-    println!("Received file: {:?}", filename);
+    print_line(&format!("Received file: {:?}", filename), true);
     Ok(fpath)
 }
 
@@ -200,8 +217,11 @@ async fn process_dcc_send(line: &str) -> Result<String, Box<dyn Error + Send + S
         let ip = caps.name("ip").unwrap().as_str();
         let port = caps.name("port").unwrap().as_str();
         let size = caps.name("size").unwrap().as_str();
-        println!("Received DCC SEND request for file: {}", filename);
-        println!("IP: {}, Port: {}, Size: {}", ip, port, size);
+        print_line(
+            &format!("Received DCC SEND request for file: {}", filename),
+            true,
+        );
+        print_line(&format!("IP: {}, Port: {}, Size: {}", ip, port, size), true);
         fpath = dcc_receive(filename, ip, port, size).await?;
     }
     Ok(fpath)
@@ -245,11 +265,11 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
                     let lines_txt_file = read_lines_to_vec(&txt_file).await?;
                     // TODO Store in a global variable
                     for (i, book_line) in lines_txt_file.into_iter().enumerate() {
-                        println!("{}: {}", i, book_line);
+                        print_line(&format!("{}: {}", i, book_line), true);
                     }
                 } else {
                     // TODO Download other files like ebooks
-                    println!("Downloaded file: {}", filename);
+                    print_line(&format!("Downloaded file: {}", filename), true);
                 }
             }
         }
