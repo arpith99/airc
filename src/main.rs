@@ -1,18 +1,19 @@
+use async_std::io::stdin;
+use clap::Parser;
+use colored::Colorize;
+use rand::Rng;
+use regex::Regex;
+use std::error::Error;
+use std::fs;
+use std::io::{Write, copy, stdout};
+use std::path::PathBuf;
+use std::process::exit;
+use std::sync::Arc;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::io::{AsyncWriteExt, AsyncReadExt, AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc::{self, Sender, Receiver};
-use std::process::exit;
-use std::error::Error;
-use std::sync::Arc;
-use std::io::{Write, stdout, copy};
-use std::fs;
-use std::path::PathBuf;
-use async_std::io::stdin;
-use rand::Rng;
-use colored::Colorize;
-use regex::Regex;
-use clap::Parser;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use zip::ZipArchive;
 
 const DOWNLOAD_PATH: &str = "/home/arpith/Downloads/Books/";
@@ -43,34 +44,54 @@ struct Args {
 }
 
 impl IrcClient {
-    async fn new(server: &str, channel: &str, username: &str, nickname: &str, realname: &str) 
-        -> Result<(Arc<IrcClient>, Receiver<String>), Box<dyn Error + Send + Sync>> {
+    async fn new(
+        server: &str,
+        channel: &str,
+        username: &str,
+        nickname: &str,
+        realname: &str,
+    ) -> Result<(Arc<IrcClient>, Receiver<String>), Box<dyn Error + Send + Sync>> {
         let stream = TcpStream::connect(format!("{}:6667", server)).await?;
         let (sender, receiver) = mpsc::channel(100);
         let (reader, writer) = stream.into_split();
         let reader = BufReader::new(reader);
-        
-        Ok((Arc::new(IrcClient {
-            server: server.to_string(),
-            channel: channel.to_string(),
-            username: username.to_string(),
-            nickname: nickname.to_string(),
-            realname: realname.to_string(),
-            reader: Arc::new(tokio::sync::Mutex::new(reader)),
-            writer: Arc::new(tokio::sync::Mutex::new(writer)),
-            sender,
-        }), receiver))
+
+        Ok((
+            Arc::new(IrcClient {
+                server: server.to_string(),
+                channel: channel.to_string(),
+                username: username.to_string(),
+                nickname: nickname.to_string(),
+                realname: realname.to_string(),
+                reader: Arc::new(tokio::sync::Mutex::new(reader)),
+                writer: Arc::new(tokio::sync::Mutex::new(writer)),
+                sender,
+            }),
+            receiver,
+        ))
     }
 }
 
 async fn init(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
     client.sender.send(format!("CAP LS\r\n")).await?;
-    client.sender.send(format!("NICK {}\r\n", client.nickname)).await?;
-    client.sender.send(format!("USER {} {} {} :{}\r\n", client.username, client.nickname, client.server, client.realname)).await?;
+    client
+        .sender
+        .send(format!("NICK {}\r\n", client.nickname))
+        .await?;
+    client
+        .sender
+        .send(format!(
+            "USER {} {} {} :{}\r\n",
+            client.username, client.nickname, client.server, client.realname
+        ))
+        .await?;
     Ok(())
 }
 
-async fn write(client: Arc<IrcClient>, mut receiver: Receiver<String>) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn write(
+    client: Arc<IrcClient>,
+    mut receiver: Receiver<String>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     while let Some(message) = receiver.recv().await {
         let mut writer = client.writer.lock().await;
         print_sent_line(&message);
@@ -90,8 +111,10 @@ fn process_command(client: Arc<IrcClient>, command: &str) -> String {
         let search_term = caps.name("search_term").unwrap().as_str();
         println!("Searching for: {}", search_term);
         return format!("PRIVMSG {} :@search {}\r\n", client.channel, search_term);
-    };
-    let message = format!("{}\r\n", command[1..].trim());    /* Strip the leading '/' */
+    } else {
+        // TODO Extract string from stored search result line
+    }
+    let message = format!("{}\r\n", command[1..].trim()); /* Strip the leading '/' */
     return message;
 }
 
@@ -102,11 +125,11 @@ async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>>
             "/join" | "/j" => {
                 let message = format!("JOIN {}\r\n", client.channel);
                 client.sender.send(message).await?;
-            },
-            "/quit" | "/q"=> {
+            }
+            "/quit" | "/q" => {
                 let message = format!("QUIT\r\n");
                 client.sender.send(message).await?;
-            },
+            }
             _ => {
                 let message = process_command(client.clone(), &command);
                 client.sender.send(message).await?;
@@ -136,36 +159,42 @@ fn print_line(line: &str) {
     stdout().flush().unwrap();
 }
 
-async fn unzip_file(filename: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn unzip_file(filename: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
     let file = fs::File::open(filename).unwrap();
     let mut archive = ZipArchive::new(file).unwrap();
     let mut file = archive.by_index(0).unwrap();
     let outpath = PathBuf::from(filename.strip_suffix(".zip").unwrap());
     let mut outfile = fs::File::create(&outpath).unwrap();
     println!(
-                "File {} extracted to \"{}\" ({} bytes)",
-                filename,
-                outpath.display(),
-                file.size()
-            );
+        "File {} extracted to \"{}\" ({} bytes)",
+        filename,
+        outpath.display(),
+        file.size()
+    );
     copy(&mut file, &mut outfile).unwrap();
-    Ok(())
+    Ok(outpath.to_str().unwrap().to_string())
 }
 
-async fn dcc_receive(filename: &str, ip: &str, port: &str, size: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn dcc_receive(
+    filename: &str,
+    ip: &str,
+    port: &str,
+    size: &str,
+) -> Result<String, Box<dyn Error + Send + Sync>> {
     let mut stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
-    let size: u32 = size[..size.len()-2].to_string().trim().parse().unwrap();    // Strip the trailing '0x01' character and newline
+    let size: u32 = size[..size.len() - 2].to_string().trim().parse().unwrap(); // Strip the trailing '0x01' character and newline
     let mut buffer = vec![0; size as usize];
     stream.read_exact(&mut buffer).await?;
-    let fname = format!("{}{}", DOWNLOAD_PATH, filename);
-    fs::write(&fname, &buffer)?;
+    let fpath = format!("{}{}", DOWNLOAD_PATH, filename);
+    fs::write(&fpath, &buffer)?;
     println!("Received file: {:?}", filename);
-    unzip_file(&fname).await?;
-    Ok(())
+    Ok(fpath)
 }
 
-async fn process_dcc_send(line: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let re = Regex::new(r".*DCC SEND (?P<filename>.*) (?P<ip>.*) (?P<port>.*) (?P<size>.*)").unwrap();
+async fn process_dcc_send(line: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let mut fpath: String = String::new();
+    let re =
+        Regex::new(r".*DCC SEND (?P<filename>.*) (?P<ip>.*) (?P<port>.*) (?P<size>.*)").unwrap();
     if let Some(caps) = re.captures(&line) {
         let filename = caps.name("filename").unwrap().as_str();
         let ip = caps.name("ip").unwrap().as_str();
@@ -173,9 +202,9 @@ async fn process_dcc_send(line: &str) -> Result<(), Box<dyn Error + Send + Sync>
         let size = caps.name("size").unwrap().as_str();
         println!("Received DCC SEND request for file: {}", filename);
         println!("IP: {}, Port: {}, Size: {}", ip, port, size);
-        dcc_receive(filename, ip, port, size).await?;
+        fpath = dcc_receive(filename, ip, port, size).await?;
     }
-    Ok(())
+    Ok(fpath)
 }
 
 async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -185,18 +214,18 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
             let mut reader = client.reader.lock().await;
             reader.read_line(&mut line).await?
         };
-        
+
         if bytes_read == 0 {
             break;
         }
-        
+
         print_received_line(&line);
         if line.starts_with("PING") {
             let pong = line.replace("PING", "PONG");
             client.sender.send(pong).await?;
         }
         if line.contains("DCC SEND") {
-            process_dcc_send(&line).await?;
+            let _ = process_dcc_send(&line).await?;
         }
     }
     Ok(())
@@ -213,8 +242,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     if args.server.is_none() {
         server = "irc.undernet.org".to_string();
-    }
-    else {
+    } else {
         server = args.server.clone().unwrap();
     }
     if args.channel.is_none() {
@@ -235,21 +263,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         realname = args.username.clone().unwrap();
     }
 
-    let (client, receiver) = IrcClient::new(
-        &server,
-        &channel,
-        &username,
-        &nickname,
-        &realname,
-    ).await?;
+    let (client, receiver) =
+        IrcClient::new(&server, &channel, &username, &nickname, &realname).await?;
 
     let init_task = tokio::spawn(init(client.clone()));
     let write_task = tokio::spawn(write(client.clone(), receiver));
     let cli_task = tokio::spawn(cli(client.clone()));
     let read_task = tokio::spawn(read(client.clone()));
 
-    let (init_result, write_result, cli_result, read_result) = tokio::join!(init_task, write_task, cli_task, read_task);
-    
+    let (init_result, write_result, cli_result, read_result) =
+        tokio::join!(init_task, write_task, cli_task, read_task);
+
     // Propagate any errors from the tasks
     init_result??;
     write_result??;
