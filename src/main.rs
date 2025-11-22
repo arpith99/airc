@@ -26,6 +26,10 @@ static SEARCH_RE: Lazy<Regex> =
 
 static ENTRY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"/(?P<entry_num>\d+)").unwrap());
 
+static DCC_SEND_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r".*DCC SEND (?P<filename>\S+) (?P<ip>\d+) (?P<port>\d+) (?P<size>\d+)").unwrap()
+});
+
 #[derive(Clone)]
 struct IrcClient {
     server: String,
@@ -256,39 +260,104 @@ async fn unzip_file(filename: &str) -> Result<String, Box<dyn Error + Send + Syn
     Ok(outpath.to_str().unwrap().to_string())
 }
 
+// Convert DCC IP (32-bit integer) to dotted-quad
+fn dcc_ip_to_string(ip_str: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let ip_num: u32 = ip_str.parse()?;
+    let a = (ip_num >> 24) & 0xFF;
+    let b = (ip_num >> 16) & 0xFF;
+    let c = (ip_num >> 8) & 0xFF;
+    let d = ip_num & 0xFF;
+    Ok(format!("{}.{}.{}.{}", a, b, c, d))
+}
+
 async fn dcc_receive(
     filename: &str,
     ip: &str,
     port: &str,
     size: &str,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let mut stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
-    let size: u32 = size[..size.len() - 2].to_string().trim().parse().unwrap(); // Strip the trailing '0x01' character and newline
-    let mut buffer = vec![0; size as usize];
-    stream.read_exact(&mut buffer).await?;
+    // Convert IP if it's in DCC format (32-bit integer)
+    let ip_addr = if ip.parse::<u32>().is_ok() {
+        dcc_ip_to_string(ip)?
+    } else {
+        ip.to_string()
+    };
+
+    let file_size: u64 = size
+        .trim()
+        .parse()
+        .map_err(|e| format!("Invalid file size '{}': {}", size, e))?;
+    let port_num: u16 = port
+        .trim()
+        .parse()
+        .map_err(|e| format!("Invalid port '{}': {}", port, e))?;
+
+    print_line(
+        &format!("Connecting to {}:{}...\n", ip_addr, port_num),
+        true,
+    );
+
+    let mut stream = TcpStream::connect(format!("{}:{}", ip_addr, port_num))
+        .await
+        .map_err(|e| format!("Failed to connect to {}:{}: {}", ip_addr, port_num, e))?;
+
     let fpath = format!("{}{}", DOWNLOAD_PATH, filename);
-    fs::write(&fpath, &buffer)?;
-    print_line(&format!("Received file: {:?}\n", filename), true);
+    let mut file = tokio::fs::File::create(&fpath)
+        .await
+        .map_err(|e| format!("Failed to create file '{}': {}", fpath, e))?;
+
+    // Stream the file instead of loading into memory
+    let mut total_bytes = 0u64;
+    let mut buffer = vec![0u8; 8192]; // 8KB chunks
+
+    while total_bytes < file_size {
+        let to_read = std::cmp::min(buffer.len() as u64, file_size - total_bytes) as usize;
+        let bytes_read = stream.read(&mut buffer[..to_read]).await?;
+
+        if bytes_read == 0 {
+            return Err(format!(
+                "Connection closed after {} of {} bytes",
+                total_bytes, file_size
+            )
+            .into());
+        }
+
+        file.write_all(&buffer[..bytes_read]).await?;
+        total_bytes += bytes_read as u64;
+
+        // Optional: Send DCC ACK (total bytes received in network byte order)
+        // stream.write_u32(total_bytes as u32).await?;
+    }
+
+    file.flush().await?;
+    print_line(
+        &format!("Received file: {} ({} bytes)\n", filename, total_bytes),
+        true,
+    );
     Ok(fpath)
 }
 
-async fn process_dcc_send(line: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let mut fpath: String = String::new();
-    let re =
-        Regex::new(r".*DCC SEND (?P<filename>.*) (?P<ip>.*) (?P<port>.*) (?P<size>.*)").unwrap();
-    if let Some(caps) = re.captures(&line) {
+async fn process_dcc_send(line: &str) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    if let Some(caps) = DCC_SEND_RE.captures(line) {
         let filename = caps.name("filename").unwrap().as_str();
         let ip = caps.name("ip").unwrap().as_str();
         let port = caps.name("port").unwrap().as_str();
         let size = caps.name("size").unwrap().as_str();
+
         print_line(
-            &format!("Received DCC SEND request for file: {}", filename),
+            &format!("Received DCC SEND request for file: {}\n", filename),
             true,
         );
-        print_line(&format!("IP: {}, Port: {}, Size: {}", ip, port, size), true);
-        fpath = dcc_receive(filename, ip, port, size).await?;
+        print_line(
+            &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
+            true,
+        );
+
+        let fpath = dcc_receive(filename, ip, port, size).await?;
+        return Ok(Some(fpath));
     }
-    Ok(fpath)
+
+    Ok(None)
 }
 
 async fn read_lines_to_vec(path: &str) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
@@ -320,20 +389,21 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
             client.sender.send(pong).await?;
         }
         if line.contains("DCC SEND") {
-            let fpath = process_dcc_send(&line).await?;
-            let path = PathBuf::from(&fpath);
+            if let Some(fpath) = process_dcc_send(&line).await? {
+                let path = PathBuf::from(&fpath);
 
-            if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-                if filename.starts_with("SearchBot_results") && filename.ends_with(".zip") {
-                    let txt_file = unzip_file(&fpath).await?;
-                    let lines_txt_file = read_lines_to_vec(&txt_file).await?;
-                    *client.booklist.lock().await = lines_txt_file.clone();
-                    for (i, book_line) in lines_txt_file.into_iter().enumerate() {
-                        print_line(&format!("{}: {}\n", i, book_line), true);
+                if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                    if filename.starts_with("SearchBot_results") && filename.ends_with(".zip") {
+                        let txt_file = unzip_file(&fpath).await?;
+                        let lines_txt_file = read_lines_to_vec(&txt_file).await?;
+                        *client.booklist.lock().await = lines_txt_file.clone();
+                        for (i, book_line) in lines_txt_file.into_iter().enumerate() {
+                            print_line(&format!("{}: {}\n", i, book_line), true);
+                        }
+                    } else {
+                        // Download other files like ebooks
+                        print_line(&format!("Downloaded file: {}\n", filename), true);
                     }
-                } else {
-                    // Download other files like ebooks
-                    print_line(&format!("Downloaded file: {}\n", filename), true);
                 }
             }
         }
