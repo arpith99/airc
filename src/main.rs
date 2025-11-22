@@ -1,11 +1,15 @@
+mod config;
+mod error;
+
 use async_std::io::stdin;
 use chrono::Local;
 use clap::Parser;
 use colored::Colorize;
+use config::Config;
+use error::{AircError, Result};
 use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
-use std::error::Error;
 use std::fs;
 use std::io::{Write, copy, stdout};
 use std::path::PathBuf;
@@ -16,6 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tracing::{info, warn, debug};
 use zip::ZipArchive;
 
 // Default download path - can be overridden via CLI
@@ -74,14 +79,17 @@ impl IrcClient {
         nickname: &str,
         realname: &str,
         download_path: &str,
-    ) -> Result<(Arc<IrcClient>, Receiver<String>), Box<dyn Error + Send + Sync>> {
+    ) -> Result<(Arc<IrcClient>, Receiver<String>)> {
+        info!("Connecting to {} ({})", server, channel);
+
         // Connect with timeout
         let stream = tokio::time::timeout(
             tokio::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS),
             TcpStream::connect(format!("{}:6667", server))
         )
         .await
-        .map_err(|_| format!("Connection to {} timed out after {} seconds", server, CONNECTION_TIMEOUT_SECS))??;
+        .map_err(|_| AircError::Timeout(format!("Connection to {} timed out after {} seconds", server, CONNECTION_TIMEOUT_SECS)))?
+        .map_err(|e| AircError::Connection(format!("Failed to connect to {}: {}", server, e)))?;
 
         let (sender, receiver) = mpsc::channel(100);
         let (reader, writer) = stream.into_split();
@@ -109,7 +117,8 @@ impl IrcClient {
     }
 }
 
-async fn init(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn init(client: Arc<IrcClient>) -> Result<()> {
+    debug!("Sending IRC registration");
     client.sender.send("CAP END\r\n".to_string()).await?;
     client
         .sender
@@ -128,7 +137,7 @@ async fn init(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
 async fn write(
     client: Arc<IrcClient>,
     mut receiver: Receiver<String>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<()> {
     while let Some(message) = receiver.recv().await {
         print_sent_line(&message);
 
@@ -237,7 +246,7 @@ async fn process_command(client: Arc<IrcClient>, command: &str) -> Option<String
     ))
 }
 
-async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn cli(client: Arc<IrcClient>) -> Result<()> {
     let mut command = String::new();
     while 0 != stdin().read_line(&mut command).await? {
         let trimmed = command.trim();
@@ -291,11 +300,11 @@ fn print_line(line: &str, ts_flag: bool) {
     let _ = stdout().flush(); // Ignore flush errors (e.g., terminal closed)
 }
 
-async fn unzip_file(filename: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+async fn unzip_file(filename: &str) -> Result<String> {
     let filename_owned = filename.to_string();
 
     // Run blocking zip operations in a separate thread pool
-    let result = tokio::task::spawn_blocking(move || -> Result<(String, u64), Box<dyn Error + Send + Sync>> {
+    let result = tokio::task::spawn_blocking(move || -> Result<(String, u64)> {
         let file = fs::File::open(&filename_owned)
             .map_err(|e| format!("Failed to open zip file '{}': {}", filename_owned, e))?;
 
@@ -341,7 +350,7 @@ async fn unzip_file(filename: &str) -> Result<String, Box<dyn Error + Send + Syn
 }
 
 // Convert DCC IP (32-bit integer) to dotted-quad
-fn dcc_ip_to_string(ip_str: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+fn dcc_ip_to_string(ip_str: &str) -> Result<String> {
     let ip_num: u32 = ip_str.parse()?;
     let a = (ip_num >> 24) & 0xFF;
     let b = (ip_num >> 16) & 0xFF;
@@ -356,7 +365,7 @@ async fn dcc_receive(
     port: &str,
     size: &str,
     download_path: &str,
-) -> Result<String, Box<dyn Error + Send + Sync>> {
+) -> Result<String> {
     // Convert IP if it's in DCC format (32-bit integer)
     let ip_addr = if ip.parse::<u32>().is_ok() {
         dcc_ip_to_string(ip)?
@@ -437,7 +446,7 @@ async fn dcc_receive(
     Ok(fpath)
 }
 
-async fn read_lines_to_vec(path: &str) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
+async fn read_lines_to_vec(path: &str) -> Result<Vec<String>> {
     let file = File::open(path).await?;
     let reader = BufReader::new(file);
     let mut lines = Vec::new();
@@ -449,7 +458,7 @@ async fn read_lines_to_vec(path: &str) -> Result<Vec<String>, Box<dyn Error + Se
 }
 
 // Handle received DCC file
-async fn handle_dcc_file(client: Arc<IrcClient>, fpath: String) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn handle_dcc_file(client: Arc<IrcClient>, fpath: String) -> Result<()> {
     let path = PathBuf::from(&fpath);
 
     if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
@@ -488,7 +497,7 @@ fn handle_ping(line: &str) -> Option<String> {
     }
 }
 
-async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn read(client: Arc<IrcClient>) -> Result<()> {
     loop {
         let mut line = String::new();
         let bytes_read = {
@@ -551,24 +560,40 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn main() -> Result<()> {
+    // Initialize tracing/logging
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
+        .init();
+
+    info!("Starting airc IRC client");
+
     let args = Args::parse();
 
-    // Use provided values or defaults
-    let server = args.server.unwrap_or_else(|| "irc.undernet.org".to_string());
-    let channel = args.channel.unwrap_or_else(|| "#bookz".to_string());
-    let download_path = args.download_path.unwrap_or_else(|| DEFAULT_DOWNLOAD_PATH.to_string());
+    // Load config from file, then merge with CLI args
+    let config = Config::load()
+        .unwrap_or_else(|e| {
+            warn!("Failed to load config: {}, using defaults", e);
+            Config::default()
+        })
+        .merge_with_args(args.server, args.channel, args.username, args.download_path);
 
-    let (username, nickname, realname) = if let Some(user) = args.username {
+    debug!("Using config: {:?}", config);
+
+    let (username, nickname, realname) = if let Some(user) = config.username {
         (user.clone(), user.clone(), user)
     } else {
         let mut rng = rand::rng();
         let random_nickname = format!("bworm{}", rng.random_range(0..=99999));
+        info!("Generated random nickname: {}", random_nickname);
         (random_nickname.clone(), random_nickname.clone(), "Book Worm".to_string())
     };
 
     let (client, receiver) =
-        IrcClient::new(&server, &channel, &username, &nickname, &realname, &download_path).await?;
+        IrcClient::new(&config.server, &config.channel, &username, &nickname, &realname, &config.download_path).await?;
 
     let init_task = tokio::spawn(init(client.clone()));
     let write_task = tokio::spawn(write(client.clone(), receiver));
