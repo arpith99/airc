@@ -207,6 +207,17 @@ async fn process_dcc_send(line: &str) -> Result<String, Box<dyn Error + Send + S
     Ok(fpath)
 }
 
+async fn read_lines_to_vec(path: &str) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
+    let file = File::open(path).await?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    let mut line_stream = reader.lines();
+    while let Some(line) = line_stream.next_line().await? {
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
 async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
         let mut line = String::new();
@@ -225,7 +236,22 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
             client.sender.send(pong).await?;
         }
         if line.contains("DCC SEND") {
-            let _ = process_dcc_send(&line).await?;
+            let fpath = process_dcc_send(&line).await?;
+            let path = PathBuf::from(&fpath);
+
+            if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                if filename.starts_with("SearchBot_results") && filename.ends_with(".zip") {
+                    let txt_file = unzip_file(&fpath).await?;
+                    let lines_txt_file = read_lines_to_vec(&txt_file).await?;
+                    // TODO Store in a global variable
+                    for (i, book_line) in lines_txt_file.into_iter().enumerate() {
+                        println!("{}: {}", i, book_line);
+                    }
+                } else {
+                    // TODO Download other files like ebooks
+                    println!("Downloaded file: {}", filename);
+                }
+            }
         }
     }
     Ok(())
