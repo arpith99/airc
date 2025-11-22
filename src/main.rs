@@ -27,7 +27,7 @@ static SEARCH_RE: Lazy<Regex> =
 static ENTRY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"/(?P<entry_num>\d+)").unwrap());
 
 static DCC_SEND_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r".*DCC SEND (?P<filename>\S+) (?P<ip>\d+) (?P<port>\d+) (?P<size>\d+)").unwrap()
+    Regex::new(r"(?i).*DCC SEND (?P<filename>\S+) (?P<ip>\d+) (?P<port>\d+) (?P<size>\d+)").unwrap()
 });
 
 #[derive(Clone)]
@@ -442,8 +442,8 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
             client.sender.send(pong).await?;
         }
 
-        // Handle DCC SEND with error recovery
-        if line.contains("DCC SEND") {
+        // Handle DCC SEND with error recovery (case-insensitive)
+        if line.to_uppercase().contains("DCC SEND") {
             match process_dcc_send(&line).await {
                 Ok(Some(fpath)) => {
                     // Handle the file in a separate task to avoid blocking read loop
