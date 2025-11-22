@@ -87,7 +87,7 @@ impl IrcClient {
 }
 
 async fn init(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    client.sender.send(format!("CAP LS\r\n")).await?;
+    client.sender.send("CAP END\r\n".to_string()).await?;
     client
         .sender
         .send(format!("NICK {}\r\n", client.nickname))
@@ -107,12 +107,19 @@ async fn write(
     mut receiver: Receiver<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     while let Some(message) = receiver.recv().await {
-        let mut writer = client.writer.lock().await;
         print_sent_line(&message);
-        writer.write_all(format!("{}", message).as_bytes()).await?;
+
+        {
+            let mut writer = client.writer.lock().await;
+            writer.write_all(message.as_bytes()).await?;
+            writer.flush().await?;
+        } // Lock released here
+
         if message.starts_with("QUIT") {
             print_line("Exiting...\n", true);
             print_line("Goodbye!\n", true);
+            // Give other tasks time to clean up
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             exit(0);
         }
     }
@@ -325,11 +332,19 @@ async fn dcc_receive(
         file.write_all(&buffer[..bytes_read]).await?;
         total_bytes += bytes_read as u64;
 
-        // Optional: Send DCC ACK (total bytes received in network byte order)
-        // stream.write_u32(total_bytes as u32).await?;
+        // Send DCC ACK (total bytes received in network byte order)
+        stream.write_all(&(total_bytes as u32).to_be_bytes()).await?;
     }
 
     file.flush().await?;
+
+    // Send final ACK to confirm complete transfer
+    stream.write_all(&(total_bytes as u32).to_be_bytes()).await?;
+    stream.flush().await?;
+
+    // Gracefully close the connection
+    stream.shutdown().await?;
+
     print_line(
         &format!("Received file: {} ({} bytes)\n", filename, total_bytes),
         true,
@@ -371,6 +386,43 @@ async fn read_lines_to_vec(path: &str) -> Result<Vec<String>, Box<dyn Error + Se
     Ok(lines)
 }
 
+// Handle received DCC file
+async fn handle_dcc_file(client: Arc<IrcClient>, fpath: String) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let path = PathBuf::from(&fpath);
+
+    if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+        if filename.starts_with("SearchBot_results") && filename.ends_with(".zip") {
+            let txt_file = unzip_file(&fpath).await?;
+            let lines_txt_file = read_lines_to_vec(&txt_file).await?;
+
+            // Move instead of clone
+            let line_count = lines_txt_file.len();
+            *client.booklist.lock().await = lines_txt_file;
+
+            // Re-lock to display (avoid holding lock during iteration)
+            let booklist = client.booklist.lock().await;
+            for (i, book_line) in booklist.iter().enumerate() {
+                print_line(&format!("{}: {}\n", i, book_line), true);
+            }
+            print_line(&format!("Loaded {} books into booklist\n", line_count), true);
+        } else {
+            // Download other files like ebooks
+            print_line(&format!("Downloaded file: {}\n", filename), true);
+        }
+    }
+
+    Ok(())
+}
+
+// Handle PING message properly
+fn handle_ping(line: &str) -> Option<String> {
+    if let Some(rest) = line.strip_prefix("PING ") {
+        Some(format!("PONG {}", rest))
+    } else {
+        None
+    }
+}
+
 async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
         let mut line = String::new();
@@ -384,26 +436,30 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
         }
 
         print_received_line(&line);
-        if line.starts_with("PING") {
-            let pong = line.replace("PING", "PONG");
+
+        // Handle PING properly
+        if let Some(pong) = handle_ping(&line) {
             client.sender.send(pong).await?;
         }
-        if line.contains("DCC SEND") {
-            if let Some(fpath) = process_dcc_send(&line).await? {
-                let path = PathBuf::from(&fpath);
 
-                if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-                    if filename.starts_with("SearchBot_results") && filename.ends_with(".zip") {
-                        let txt_file = unzip_file(&fpath).await?;
-                        let lines_txt_file = read_lines_to_vec(&txt_file).await?;
-                        *client.booklist.lock().await = lines_txt_file.clone();
-                        for (i, book_line) in lines_txt_file.into_iter().enumerate() {
-                            print_line(&format!("{}: {}\n", i, book_line), true);
+        // Handle DCC SEND with error recovery
+        if line.contains("DCC SEND") {
+            match process_dcc_send(&line).await {
+                Ok(Some(fpath)) => {
+                    // Handle the file in a separate task to avoid blocking read loop
+                    let client_clone = client.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_dcc_file(client_clone, fpath).await {
+                            print_line(&format!("Error handling DCC file: {}\n", e), true);
                         }
-                    } else {
-                        // Download other files like ebooks
-                        print_line(&format!("Downloaded file: {}\n", filename), true);
-                    }
+                    });
+                }
+                Ok(None) => {
+                    // No DCC SEND match, ignore
+                }
+                Err(e) => {
+                    // Log error but don't crash the read loop
+                    print_line(&format!("Error processing DCC SEND: {}\n", e), true);
                 }
             }
         }
