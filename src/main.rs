@@ -352,29 +352,6 @@ async fn dcc_receive(
     Ok(fpath)
 }
 
-async fn process_dcc_send(line: &str) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
-    if let Some(caps) = DCC_SEND_RE.captures(line) {
-        let filename = caps.name("filename").unwrap().as_str();
-        let ip = caps.name("ip").unwrap().as_str();
-        let port = caps.name("port").unwrap().as_str();
-        let size = caps.name("size").unwrap().as_str();
-
-        print_line(
-            &format!("Received DCC SEND request for file: {}\n", filename),
-            true,
-        );
-        print_line(
-            &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
-            true,
-        );
-
-        let fpath = dcc_receive(filename, ip, port, size).await?;
-        return Ok(Some(fpath));
-    }
-
-    Ok(None)
-}
-
 async fn read_lines_to_vec(path: &str) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
     let file = File::open(path).await?;
     let reader = BufReader::new(file);
@@ -444,23 +421,37 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
 
         // Handle DCC SEND with error recovery (case-insensitive)
         if line.to_uppercase().contains("DCC SEND") {
-            match process_dcc_send(&line).await {
-                Ok(Some(fpath)) => {
-                    // Handle the file in a separate task to avoid blocking read loop
-                    let client_clone = client.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_dcc_file(client_clone, fpath).await {
-                            print_line(&format!("Error handling DCC file: {}\n", e), true);
+            // Parse the DCC SEND parameters immediately without awaiting
+            if let Some(caps) = DCC_SEND_RE.captures(&line) {
+                let filename = caps.name("filename").unwrap().as_str().to_string();
+                let ip = caps.name("ip").unwrap().as_str().to_string();
+                let port = caps.name("port").unwrap().as_str().to_string();
+                let size = caps.name("size").unwrap().as_str().to_string();
+
+                print_line(
+                    &format!("Received DCC SEND request for file: {}\n", filename),
+                    true,
+                );
+                print_line(
+                    &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
+                    true,
+                );
+
+                // Spawn the ENTIRE download+processing in a separate task
+                // This prevents blocking the read loop during file transfer
+                let client_clone = client.clone();
+                tokio::spawn(async move {
+                    match dcc_receive(&filename, &ip, &port, &size).await {
+                        Ok(fpath) => {
+                            if let Err(e) = handle_dcc_file(client_clone, fpath).await {
+                                print_line(&format!("Error handling DCC file: {}\n", e), true);
+                            }
                         }
-                    });
-                }
-                Ok(None) => {
-                    // No DCC SEND match, ignore
-                }
-                Err(e) => {
-                    // Log error but don't crash the read loop
-                    print_line(&format!("Error processing DCC SEND: {}\n", e), true);
-                }
+                        Err(e) => {
+                            print_line(&format!("Error receiving DCC file: {}\n", e), true);
+                        }
+                    }
+                });
             }
         }
     }
