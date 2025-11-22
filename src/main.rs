@@ -21,6 +21,10 @@ use zip::ZipArchive;
 // Default download path - can be overridden via CLI
 const DEFAULT_DOWNLOAD_PATH: &str = "./downloads/";
 
+// Timeout constants
+const CONNECTION_TIMEOUT_SECS: u64 = 30;
+const DCC_TRANSFER_TIMEOUT_SECS: u64 = 300; // 5 minutes per chunk
+
 // Compile regexes once at startup
 static SEARCH_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"/s(earch)? (?P<search_term>.*)").unwrap());
@@ -71,7 +75,14 @@ impl IrcClient {
         realname: &str,
         download_path: &str,
     ) -> Result<(Arc<IrcClient>, Receiver<String>), Box<dyn Error + Send + Sync>> {
-        let stream = TcpStream::connect(format!("{}:6667", server)).await?;
+        // Connect with timeout
+        let stream = tokio::time::timeout(
+            tokio::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+            TcpStream::connect(format!("{}:6667", server))
+        )
+        .await
+        .map_err(|_| format!("Connection to {} timed out after {} seconds", server, CONNECTION_TIMEOUT_SECS))??;
+
         let (sender, receiver) = mpsc::channel(100);
         let (reader, writer) = stream.into_split();
         let reader = BufReader::new(reader);
@@ -127,8 +138,8 @@ async fn write(
             writer.flush().await?;
         } // Lock released here
 
-        // Check if this is a QUIT command (case-insensitive)
-        if message.to_uppercase().starts_with("QUIT") {
+        // Check if this is a QUIT command (case-insensitive, no allocation)
+        if message.len() >= 4 && message[..4].eq_ignore_ascii_case("QUIT") {
             print_line("Exiting...\n", true);
             print_line("Goodbye!\n", true);
             // Give other tasks time to clean up
@@ -141,11 +152,17 @@ async fn write(
 
 // Local command to search the booklist
 async fn handle_search_booklist(client: Arc<IrcClient>, search_term: &str) {
-    let booklist = client.booklist.lock().await;
     let search_lower = search_term.to_lowercase();
-    let mut found = false;
 
+    // Clone the booklist to avoid holding lock during I/O
+    let booklist = {
+        let list = client.booklist.lock().await;
+        list.clone()
+    };
+
+    let mut found = false;
     for (i, book_line) in booklist.iter().enumerate() {
+        // Use case-insensitive contains without allocation per line
         if book_line.to_lowercase().contains(&search_lower) {
             print_line(&format!("{}: {}\n", i, book_line), true);
             found = true;
@@ -361,9 +378,14 @@ async fn dcc_receive(
         true,
     );
 
-    let mut stream = TcpStream::connect(format!("{}:{}", ip_addr, port_num))
-        .await
-        .map_err(|e| format!("Failed to connect to {}:{}: {}", ip_addr, port_num, e))?;
+    // Connect with timeout
+    let mut stream = tokio::time::timeout(
+        tokio::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+        TcpStream::connect(format!("{}:{}", ip_addr, port_num))
+    )
+    .await
+    .map_err(|_| format!("DCC connection to {}:{} timed out", ip_addr, port_num))?
+    .map_err(|e| format!("Failed to connect to {}:{}: {}", ip_addr, port_num, e))?;
 
     let fpath = format!("{}{}", download_path, filename);
     let mut file = tokio::fs::File::create(&fpath)
@@ -376,7 +398,14 @@ async fn dcc_receive(
 
     while total_bytes < file_size {
         let to_read = std::cmp::min(buffer.len() as u64, file_size - total_bytes) as usize;
-        let bytes_read = stream.read(&mut buffer[..to_read]).await?;
+
+        // Read with timeout to detect stalled transfers
+        let bytes_read = tokio::time::timeout(
+            tokio::time::Duration::from_secs(DCC_TRANSFER_TIMEOUT_SECS),
+            stream.read(&mut buffer[..to_read])
+        )
+        .await
+        .map_err(|_| format!("DCC transfer timed out after {} seconds", DCC_TRANSFER_TIMEOUT_SECS))??;
 
         if bytes_read == 0 {
             return Err(format!(
@@ -428,13 +457,16 @@ async fn handle_dcc_file(client: Arc<IrcClient>, fpath: String) -> Result<(), Bo
             let txt_file = unzip_file(&fpath).await?;
             let lines_txt_file = read_lines_to_vec(&txt_file).await?;
 
-            // Move instead of clone
+            // Update booklist and clone for display to avoid holding lock during I/O
             let line_count = lines_txt_file.len();
-            *client.booklist.lock().await = lines_txt_file;
+            let display_list = {
+                let mut booklist = client.booklist.lock().await;
+                *booklist = lines_txt_file;
+                booklist.clone()
+            };
 
-            // Re-lock to display (avoid holding lock during iteration)
-            let booklist = client.booklist.lock().await;
-            for (i, book_line) in booklist.iter().enumerate() {
+            // Display without holding lock
+            for (i, book_line) in display_list.iter().enumerate() {
                 print_line(&format!("{}: {}\n", i, book_line), true);
             }
             print_line(&format!("Loaded {} books into booklist\n", line_count), true);
@@ -476,44 +508,42 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
         }
 
         // Handle DCC SEND with error recovery (case-insensitive)
-        if line.to_uppercase().contains("DCC SEND") {
-            // Parse the DCC SEND parameters immediately without awaiting
-            if let Some(caps) = DCC_SEND_RE.captures(&line) {
-                // Extract captures safely - regex guarantees these exist if it matched
-                let filename = caps.name("filename").map(|m| m.as_str().to_string());
-                let ip = caps.name("ip").map(|m| m.as_str().to_string());
-                let port = caps.name("port").map(|m| m.as_str().to_string());
-                let size = caps.name("size").map(|m| m.as_str().to_string());
+        // Check with regex directly (already case-insensitive with (?i))
+        if let Some(caps) = DCC_SEND_RE.captures(&line) {
+            // Extract captures safely - regex guarantees these exist if it matched
+            let filename = caps.name("filename").map(|m| m.as_str().to_string());
+            let ip = caps.name("ip").map(|m| m.as_str().to_string());
+            let port = caps.name("port").map(|m| m.as_str().to_string());
+            let size = caps.name("size").map(|m| m.as_str().to_string());
 
-                if let (Some(filename), Some(ip), Some(port), Some(size)) = (filename, ip, port, size) {
-                    print_line(
-                        &format!("Received DCC SEND request for file: {}\n", filename),
-                        true,
-                    );
-                    print_line(
-                        &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
-                        true,
-                    );
+            if let (Some(filename), Some(ip), Some(port), Some(size)) = (filename, ip, port, size) {
+                print_line(
+                    &format!("Received DCC SEND request for file: {}\n", filename),
+                    true,
+                );
+                print_line(
+                    &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
+                    true,
+                );
 
-                    // Spawn the ENTIRE download+processing in a separate task
-                    // This prevents blocking the read loop during file transfer
-                    let client_clone = client.clone();
-                    let download_path = client.download_path.clone();
+                // Spawn the ENTIRE download+processing in a separate task
+                // This prevents blocking the read loop during file transfer
+                let client_clone = client.clone();
+                let download_path = client.download_path.clone();
 
-                    // Track the spawned task for graceful shutdown
-                    client.dcc_tasks.lock().await.spawn(async move {
-                        match dcc_receive(&filename, &ip, &port, &size, &download_path).await {
-                            Ok(fpath) => {
-                                if let Err(e) = handle_dcc_file(client_clone, fpath).await {
-                                    print_line(&format!("Error handling DCC file: {}\n", e), true);
-                                }
-                            }
-                            Err(e) => {
-                                print_line(&format!("Error receiving DCC file: {}\n", e), true);
+                // Track the spawned task for graceful shutdown
+                client.dcc_tasks.lock().await.spawn(async move {
+                    match dcc_receive(&filename, &ip, &port, &size, &download_path).await {
+                        Ok(fpath) => {
+                            if let Err(e) = handle_dcc_file(client_clone, fpath).await {
+                                print_line(&format!("Error handling DCC file: {}\n", e), true);
                             }
                         }
-                    });
-                }
+                        Err(e) => {
+                            print_line(&format!("Error receiving DCC file: {}\n", e), true);
+                        }
+                    }
+                });
             }
         }
     }
