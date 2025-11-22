@@ -18,7 +18,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use zip::ZipArchive;
 
-const DOWNLOAD_PATH: &str = "/home/arpith/Downloads/Books/";
+// Default download path - can be overridden via CLI
+const DEFAULT_DOWNLOAD_PATH: &str = "./downloads/";
 
 // Compile regexes once at startup
 static SEARCH_RE: Lazy<Regex> =
@@ -41,6 +42,8 @@ struct IrcClient {
     writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
     sender: Sender<String>,
     booklist: Arc<tokio::sync::Mutex<Vec<String>>>,
+    download_path: String,
+    dcc_tasks: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
 }
 
 #[derive(Parser, Debug)]
@@ -54,6 +57,9 @@ struct Args {
     /// The username to use
     #[clap(short, long)]
     username: Option<String>,
+    /// Download path for DCC files
+    #[clap(short, long)]
+    download_path: Option<String>,
 }
 
 impl IrcClient {
@@ -63,11 +69,15 @@ impl IrcClient {
         username: &str,
         nickname: &str,
         realname: &str,
+        download_path: &str,
     ) -> Result<(Arc<IrcClient>, Receiver<String>), Box<dyn Error + Send + Sync>> {
         let stream = TcpStream::connect(format!("{}:6667", server)).await?;
         let (sender, receiver) = mpsc::channel(100);
         let (reader, writer) = stream.into_split();
         let reader = BufReader::new(reader);
+
+        // Ensure download directory exists
+        tokio::fs::create_dir_all(download_path).await?;
 
         Ok((
             Arc::new(IrcClient {
@@ -80,6 +90,8 @@ impl IrcClient {
                 writer: Arc::new(tokio::sync::Mutex::new(writer)),
                 sender,
                 booklist: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                download_path: download_path.to_string(),
+                dcc_tasks: Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new())),
             }),
             receiver,
         ))
@@ -257,28 +269,58 @@ fn print_line(line: &str, ts_flag: bool) {
     if ts_flag {
         print_timestamp();
     }
-    print!("{}", format!("{}", prefix).yellow());
-    print!("{}", format!("{}", message).white());
-    stdout().flush().unwrap();
+    print!("{}", prefix.yellow());
+    print!("{}", message.white());
+    let _ = stdout().flush(); // Ignore flush errors (e.g., terminal closed)
 }
 
 async fn unzip_file(filename: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let file = fs::File::open(filename).unwrap();
-    let mut archive = ZipArchive::new(file).unwrap();
-    let mut file = archive.by_index(0).unwrap();
-    let outpath = PathBuf::from(filename.strip_suffix(".zip").unwrap());
-    let mut outfile = fs::File::create(&outpath).unwrap();
+    let filename_owned = filename.to_string();
+
+    // Run blocking zip operations in a separate thread pool
+    let result = tokio::task::spawn_blocking(move || -> Result<(String, u64), Box<dyn Error + Send + Sync>> {
+        let file = fs::File::open(&filename_owned)
+            .map_err(|e| format!("Failed to open zip file '{}': {}", filename_owned, e))?;
+
+        let mut archive = ZipArchive::new(file)
+            .map_err(|e| format!("Failed to read zip archive '{}': {}", filename_owned, e))?;
+
+        let mut zipped_file = archive.by_index(0)
+            .map_err(|e| format!("Failed to access first file in archive: {}", e))?;
+
+        let file_size = zipped_file.size();
+
+        let outpath = PathBuf::from(
+            filename_owned.strip_suffix(".zip")
+                .ok_or("Filename doesn't end with .zip")?
+        );
+
+        let mut outfile = fs::File::create(&outpath)
+            .map_err(|e| format!("Failed to create output file '{}': {}", outpath.display(), e))?;
+
+        copy(&mut zipped_file, &mut outfile)
+            .map_err(|e| format!("Failed to extract file: {}", e))?;
+
+        let outpath_str = outpath.to_str()
+            .ok_or("Output path contains invalid UTF-8")?
+            .to_string();
+
+        Ok((outpath_str, file_size))
+    }).await?;
+
+    let (outpath_str, file_size) = result?;
+
     print_line(
         &format!(
-            "File {} extracted to \"{}\" ({} bytes)",
+            "File {} extracted to \"{}\" ({} bytes)\n",
             filename,
-            outpath.display(),
-            file.size(),
+            outpath_str,
+            file_size,
         ),
         true,
     );
-    copy(&mut file, &mut outfile).unwrap();
-    Ok(outpath.to_str().unwrap().to_string())
+
+    Ok(outpath_str)
 }
 
 // Convert DCC IP (32-bit integer) to dotted-quad
@@ -296,6 +338,7 @@ async fn dcc_receive(
     ip: &str,
     port: &str,
     size: &str,
+    download_path: &str,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
     // Convert IP if it's in DCC format (32-bit integer)
     let ip_addr = if ip.parse::<u32>().is_ok() {
@@ -322,14 +365,14 @@ async fn dcc_receive(
         .await
         .map_err(|e| format!("Failed to connect to {}:{}: {}", ip_addr, port_num, e))?;
 
-    let fpath = format!("{}{}", DOWNLOAD_PATH, filename);
+    let fpath = format!("{}{}", download_path, filename);
     let mut file = tokio::fs::File::create(&fpath)
         .await
         .map_err(|e| format!("Failed to create file '{}': {}", fpath, e))?;
 
     // Stream the file instead of loading into memory
     let mut total_bytes = 0u64;
-    let mut buffer = vec![0u8; 8192]; // 8KB chunks
+    let mut buffer = vec![0u8; 65536]; // 64KB chunks for better performance
 
     while total_bytes < file_size {
         let to_read = std::cmp::min(buffer.len() as u64, file_size - total_bytes) as usize;
@@ -347,13 +390,12 @@ async fn dcc_receive(
         total_bytes += bytes_read as u64;
 
         // Send DCC ACK (total bytes received in network byte order)
-        stream.write_all(&(total_bytes as u32).to_be_bytes()).await?;
+        // DCC protocol uses u32 which wraps around for files >4GB
+        let ack_bytes = (total_bytes as u32).to_be_bytes();
+        stream.write_all(&ack_bytes).await?;
     }
 
     file.flush().await?;
-
-    // Send final ACK to confirm complete transfer
-    stream.write_all(&(total_bytes as u32).to_be_bytes()).await?;
     stream.flush().await?;
 
     // Gracefully close the connection
@@ -437,35 +479,41 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
         if line.to_uppercase().contains("DCC SEND") {
             // Parse the DCC SEND parameters immediately without awaiting
             if let Some(caps) = DCC_SEND_RE.captures(&line) {
-                let filename = caps.name("filename").unwrap().as_str().to_string();
-                let ip = caps.name("ip").unwrap().as_str().to_string();
-                let port = caps.name("port").unwrap().as_str().to_string();
-                let size = caps.name("size").unwrap().as_str().to_string();
+                // Extract captures safely - regex guarantees these exist if it matched
+                let filename = caps.name("filename").map(|m| m.as_str().to_string());
+                let ip = caps.name("ip").map(|m| m.as_str().to_string());
+                let port = caps.name("port").map(|m| m.as_str().to_string());
+                let size = caps.name("size").map(|m| m.as_str().to_string());
 
-                print_line(
-                    &format!("Received DCC SEND request for file: {}\n", filename),
-                    true,
-                );
-                print_line(
-                    &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
-                    true,
-                );
+                if let (Some(filename), Some(ip), Some(port), Some(size)) = (filename, ip, port, size) {
+                    print_line(
+                        &format!("Received DCC SEND request for file: {}\n", filename),
+                        true,
+                    );
+                    print_line(
+                        &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
+                        true,
+                    );
 
-                // Spawn the ENTIRE download+processing in a separate task
-                // This prevents blocking the read loop during file transfer
-                let client_clone = client.clone();
-                tokio::spawn(async move {
-                    match dcc_receive(&filename, &ip, &port, &size).await {
-                        Ok(fpath) => {
-                            if let Err(e) = handle_dcc_file(client_clone, fpath).await {
-                                print_line(&format!("Error handling DCC file: {}\n", e), true);
+                    // Spawn the ENTIRE download+processing in a separate task
+                    // This prevents blocking the read loop during file transfer
+                    let client_clone = client.clone();
+                    let download_path = client.download_path.clone();
+
+                    // Track the spawned task for graceful shutdown
+                    client.dcc_tasks.lock().await.spawn(async move {
+                        match dcc_receive(&filename, &ip, &port, &size, &download_path).await {
+                            Ok(fpath) => {
+                                if let Err(e) = handle_dcc_file(client_clone, fpath).await {
+                                    print_line(&format!("Error handling DCC file: {}\n", e), true);
+                                }
+                            }
+                            Err(e) => {
+                                print_line(&format!("Error receiving DCC file: {}\n", e), true);
                             }
                         }
-                        Err(e) => {
-                            print_line(&format!("Error receiving DCC file: {}\n", e), true);
-                        }
-                    }
-                });
+                    });
+                }
             }
         }
     }
@@ -474,38 +522,23 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let server: String;
-    let channel: String;
-    let username: String;
-    let nickname: String;
-    let realname: String;
     let args = Args::parse();
 
-    if args.server.is_none() {
-        server = "irc.undernet.org".to_string();
+    // Use provided values or defaults
+    let server = args.server.unwrap_or_else(|| "irc.undernet.org".to_string());
+    let channel = args.channel.unwrap_or_else(|| "#bookz".to_string());
+    let download_path = args.download_path.unwrap_or_else(|| DEFAULT_DOWNLOAD_PATH.to_string());
+
+    let (username, nickname, realname) = if let Some(user) = args.username {
+        (user.clone(), user.clone(), user)
     } else {
-        server = args.server.clone().unwrap();
-    }
-    if args.channel.is_none() {
-        channel = "#bookz".to_string();
-    } else {
-        channel = args.channel.clone().unwrap();
-    }
-    if args.username.is_none() {
         let mut rng = rand::rng();
-        let mut random_nickname: String = String::from("bworm");
-        random_nickname.push_str(rng.random_range(0..=99999).to_string().as_str());
-        username = random_nickname.clone();
-        nickname = random_nickname.clone();
-        realname = "Book Worm".to_string();
-    } else {
-        username = args.username.clone().unwrap();
-        nickname = args.username.clone().unwrap();
-        realname = args.username.clone().unwrap();
-    }
+        let random_nickname = format!("bworm{}", rng.random_range(0..=99999));
+        (random_nickname.clone(), random_nickname.clone(), "Book Worm".to_string())
+    };
 
     let (client, receiver) =
-        IrcClient::new(&server, &channel, &username, &nickname, &realname).await?;
+        IrcClient::new(&server, &channel, &username, &nickname, &realname, &download_path).await?;
 
     let init_task = tokio::spawn(init(client.clone()));
     let write_task = tokio::spawn(write(client.clone(), receiver));
@@ -520,6 +553,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     write_result??;
     cli_result??;
     read_result??;
+
+    // Wait for all DCC tasks to complete before exiting
+    print_line("Waiting for DCC transfers to complete...\n", true);
+    let mut tasks = client.dcc_tasks.lock().await;
+    while tasks.join_next().await.is_some() {
+        // All tasks joined
+    }
+    print_line("All DCC transfers completed.\n", true);
 
     Ok(())
 }
