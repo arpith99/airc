@@ -29,6 +29,7 @@ struct IrcClient {
     reader: Arc<tokio::sync::Mutex<BufReader<OwnedReadHalf>>>,
     writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
     sender: Sender<String>,
+    booklist: Arc<tokio::sync::Mutex<Vec<String>>>,
 }
 
 #[derive(Parser, Debug)]
@@ -67,6 +68,7 @@ impl IrcClient {
                 reader: Arc::new(tokio::sync::Mutex::new(reader)),
                 writer: Arc::new(tokio::sync::Mutex::new(writer)),
                 sender,
+                booklist: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             }),
             receiver,
         ))
@@ -106,14 +108,30 @@ async fn write(
     Ok(())
 }
 
-fn process_command(client: Arc<IrcClient>, command: &str) -> String {
+async fn process_command(client: Arc<IrcClient>, command: &str) -> String {
     let re = Regex::new(r"/s(earch)? (?P<search_term>.*)").unwrap();
     if let Some(caps) = re.captures(command) {
         let search_term = caps.name("search_term").unwrap().as_str();
-        print_line(&format!("Searching for: {}", search_term), true);
+        print_line(&format!("Searching for: {}\n", search_term), true);
         return format!("PRIVMSG {} :@search {}\r\n", client.channel, search_term);
     } else {
-        // TODO Extract string from stored search result line
+        // Extract string from stored search result line
+        let re = Regex::new(r"/(?P<entry_num>\d+)").unwrap();
+        if let Some(caps) = re.captures(command) {
+            let entry_num = caps.name("entry_num").unwrap().as_str();
+            print_line(&format!("Requesting entry number: {}\n", entry_num), true);
+            let booklist = client.booklist.lock().await;
+            if let Some(book_entry) = booklist.get(entry_num.parse::<usize>().unwrap_or(0)) {
+                print_line(&format!("Book entry: {}\n", book_entry), true);
+                return format!("PRIVMSG {} :{}\r\n", client.channel, book_entry);
+            } else {
+                print_line(
+                    &format!("Entry number {} not found in booklist\n", entry_num),
+                    true,
+                );
+                return String::new();
+            }
+        }
     }
     let message = format!("{}\r\n", command[1..].trim()); /* Strip the leading '/' */
     return message;
@@ -132,7 +150,7 @@ async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>>
                 client.sender.send(message).await?;
             }
             _ => {
-                let message = process_command(client.clone(), &command);
+                let message = process_command(client.clone(), &command).await;
                 client.sender.send(message).await?;
             }
         }
@@ -204,7 +222,7 @@ async fn dcc_receive(
     stream.read_exact(&mut buffer).await?;
     let fpath = format!("{}{}", DOWNLOAD_PATH, filename);
     fs::write(&fpath, &buffer)?;
-    print_line(&format!("Received file: {:?}", filename), true);
+    print_line(&format!("Received file: {:?}\n", filename), true);
     Ok(fpath)
 }
 
@@ -263,13 +281,13 @@ async fn read(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>
                 if filename.starts_with("SearchBot_results") && filename.ends_with(".zip") {
                     let txt_file = unzip_file(&fpath).await?;
                     let lines_txt_file = read_lines_to_vec(&txt_file).await?;
-                    // TODO Store in a global variable
+                    *client.booklist.lock().await = lines_txt_file.clone();
                     for (i, book_line) in lines_txt_file.into_iter().enumerate() {
-                        print_line(&format!("{}: {}", i, book_line), true);
+                        print_line(&format!("{}: {}\n", i, book_line), true);
                     }
                 } else {
-                    // TODO Download other files like ebooks
-                    print_line(&format!("Downloaded file: {}", filename), true);
+                    // Download other files like ebooks
+                    print_line(&format!("Downloaded file: {}\n", filename), true);
                 }
             }
         }
