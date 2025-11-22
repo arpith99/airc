@@ -2,6 +2,7 @@ use async_std::io::stdin;
 use chrono::Local;
 use clap::Parser;
 use colored::Colorize;
+use once_cell::sync::Lazy;
 use rand::Rng;
 use regex::Regex;
 use std::error::Error;
@@ -18,6 +19,12 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use zip::ZipArchive;
 
 const DOWNLOAD_PATH: &str = "/home/arpith/Downloads/Books/";
+
+// Compile regexes once at startup
+static SEARCH_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"/s(earch)? (?P<search_term>.*)").unwrap());
+
+static ENTRY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"/(?P<entry_num>\d+)").unwrap());
 
 #[derive(Clone)]
 struct IrcClient {
@@ -108,52 +115,91 @@ async fn write(
     Ok(())
 }
 
-async fn process_command(client: Arc<IrcClient>, command: &str) -> String {
-    let re = Regex::new(r"/s(earch)? (?P<search_term>.*)").unwrap();
-    if let Some(caps) = re.captures(command) {
-        let search_term = caps.name("search_term").unwrap().as_str();
-        print_line(&format!("Searching for: {}\n", search_term), true);
-        return format!("PRIVMSG {} :@search {}\r\n", client.channel, search_term);
-    } else {
-        // Extract string from stored search result line
-        let re = Regex::new(r"/(?P<entry_num>\d+)").unwrap();
-        if let Some(caps) = re.captures(command) {
-            let entry_num = caps.name("entry_num").unwrap().as_str();
-            print_line(&format!("Requesting entry number: {}\n", entry_num), true);
-            let booklist = client.booklist.lock().await;
-            if let Some(book_entry) = booklist.get(entry_num.parse::<usize>().unwrap_or(0)) {
-                print_line(&format!("Book entry: {}\n", book_entry), true);
-                return format!("PRIVMSG {} :{}\r\n", client.channel, book_entry);
-            } else {
-                print_line(
-                    &format!("Entry number {} not found in booklist\n", entry_num),
-                    true,
-                );
-                return String::new();
-            }
+// Local command to search the booklist
+async fn handle_search_booklist(client: Arc<IrcClient>, search_term: &str) {
+    let booklist = client.booklist.lock().await;
+    let search_lower = search_term.to_lowercase();
+    let mut found = false;
+
+    for (i, book_line) in booklist.iter().enumerate() {
+        if book_line.to_lowercase().contains(&search_lower) {
+            print_line(&format!("{}: {}\n", i, book_line), true);
+            found = true;
         }
     }
-    let message = format!("{}\r\n", command[1..].trim()); /* Strip the leading '/' */
-    return message;
+
+    if !found {
+        print_line(&format!("No results found for '{}'\n", search_term), true);
+    }
+}
+
+// Returns Option<String> - Some(msg) if should send to IRC, None if shouldn't
+async fn process_command(client: Arc<IrcClient>, command: &str) -> Option<String> {
+    // JOIN command
+    if command == "/join" || command == "/j" {
+        return Some(format!("JOIN {}\r\n", client.channel));
+    }
+
+    // QUIT command
+    if command == "/quit" || command == "/q" {
+        return Some("QUIT\r\n".to_string());
+    }
+
+    // SEARCH command
+    if let Some(caps) = SEARCH_RE.captures(command) {
+        let search_term = caps.name("search_term").unwrap().as_str();
+        print_line(&format!("Searching for: {}\n", search_term), true);
+        return Some(format!("PRIVMSG {} :@search {}\r\n", client.channel, search_term));
+    }
+
+    // ENTRY NUMBER selection
+    if let Some(caps) = ENTRY_RE.captures(command) {
+        let entry_num: usize = caps
+            .name("entry_num")
+            .unwrap()
+            .as_str()
+            .parse()
+            .unwrap_or(0);
+        print_line(&format!("Requesting entry number: {}\n", entry_num), true);
+
+        // Look up the actual book entry
+        let booklist = client.booklist.lock().await;
+        if let Some(book_entry) = booklist.get(entry_num) {
+            print_line(&format!("Book entry: {}\n", book_entry), true);
+            return Some(format!("PRIVMSG {} :{}\r\n", client.channel, book_entry));
+        } else {
+            print_line(
+                &format!("Entry number {} not found in booklist\n", entry_num),
+                true,
+            );
+            return None; // Don't send anything
+        }
+    }
+
+    // Default: treat as raw IRC command
+    Some(format!(
+        "{}\r\n",
+        command.strip_prefix('/').unwrap_or(command).trim()
+    ))
 }
 
 async fn cli(client: Arc<IrcClient>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut command = String::new();
     while 0 != stdin().read_line(&mut command).await? {
-        match command.trim() {
-            "/join" | "/j" => {
-                let message = format!("JOIN {}\r\n", client.channel);
-                client.sender.send(message).await?;
-            }
-            "/quit" | "/q" => {
-                let message = format!("QUIT\r\n");
-                client.sender.send(message).await?;
-            }
-            _ => {
-                let message = process_command(client.clone(), &command).await;
-                client.sender.send(message).await?;
-            }
+        let trimmed = command.trim();
+
+        // Handle local commands (don't send to IRC)
+        if let Some(search_term) = trimmed.strip_prefix("/ss ") {
+            handle_search_booklist(client.clone(), search_term).await;
+            command.clear();
+            continue;
         }
+
+        // Handle IRC commands (generate messages to send)
+        if let Some(message) = process_command(client.clone(), trimmed).await {
+            client.sender.send(message).await?;
+        }
+
         command.clear();
     }
     Ok(())
