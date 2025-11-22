@@ -115,7 +115,8 @@ async fn write(
             writer.flush().await?;
         } // Lock released here
 
-        if message.starts_with("QUIT") {
+        // Check if this is a QUIT command (case-insensitive)
+        if message.to_uppercase().starts_with("QUIT") {
             print_line("Exiting...\n", true);
             print_line("Goodbye!\n", true);
             // Give other tasks time to clean up
@@ -152,8 +153,21 @@ async fn process_command(client: Arc<IrcClient>, command: &str) -> Option<String
     }
 
     // QUIT command
-    if command == "/quit" || command == "/q" {
-        return Some("QUIT\r\n".to_string());
+    if command.starts_with("/quit") || command.starts_with("/q ") || command == "/q" {
+        // Extract optional quit message
+        let quit_msg = if command.starts_with("/quit ") {
+            command.strip_prefix("/quit ").unwrap_or("")
+        } else if command.starts_with("/q ") {
+            command.strip_prefix("/q ").unwrap_or("")
+        } else {
+            ""
+        };
+
+        return if quit_msg.is_empty() {
+            Some("QUIT\r\n".to_string())
+        } else {
+            Some(format!("QUIT :{}\r\n", quit_msg))
+        };
     }
 
     // SEARCH command
