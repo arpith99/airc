@@ -59,11 +59,11 @@ impl Default for Config {
 
 impl Config {
     /// Load configuration from file, or create default if not found
-    pub fn load() -> Result<Self> {
+    pub async fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
 
-        if config_path.exists() {
-            let contents = std::fs::read_to_string(&config_path)?;
+        if tokio::fs::try_exists(&config_path).await.unwrap_or(false) {
+            let contents = tokio::fs::read_to_string(&config_path).await?;
             let config: Config = toml::from_str(&contents)?;
             tracing::info!("Loaded config from {}", config_path.display());
             Ok(config)
@@ -74,17 +74,17 @@ impl Config {
     }
 
     /// Save configuration to file
-    pub fn save(&self) -> Result<()> {
+    pub async fn save(&self) -> Result<()> {
         let config_path = Self::config_path()?;
 
         if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         let contents = toml::to_string_pretty(self)
             .map_err(|e| AircError::Config(format!("Failed to serialize config: {}", e)))?;
 
-        std::fs::write(&config_path, contents)?;
+        tokio::fs::write(&config_path, contents).await?;
         tracing::info!("Saved config to {}", config_path.display());
         Ok(())
     }
