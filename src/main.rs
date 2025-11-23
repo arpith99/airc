@@ -728,7 +728,14 @@ async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
         // Read raw bytes until newline (handles invalid UTF-8)
         let (line, bytes_read) = {
             let mut reader = client.reader.lock().await;
-            reader.read_line(&mut line).await?
+
+            let mut buffer = Vec::new();
+            let bytes = reader.read_until(b'\n', &mut buffer).await?;
+
+            // Convert to String, replacing invalid UTF-8 with � (replacement character)
+            let line = String::from_utf8_lossy(&buffer).to_string();
+
+            (line, bytes)
         };
 
         if bytes_read == 0 {
