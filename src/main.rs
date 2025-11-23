@@ -888,9 +888,77 @@ mod tests {
         let msg3 = ":bot!user@host PRIVMSG nick :DCC SEND book.epub 3232235777 9999 123456";
         assert!(DCC_SEND_RE.is_match(msg3));
 
+        // Test real-world message with underscores and commas in filename
+        let msg4 = ":Bsk!~abc@177.243.138.6 PRIVMSG bworm9084 :DCC SEND Exceptional_C++_-_47_Engineering_Puzzles,_Programming_Problems,_and_Solutions.pdf 2985527814 10052 11717617";
+        assert!(DCC_SEND_RE.is_match(msg4), "Real-world DCC SEND message should match");
+
+        let caps4 = DCC_SEND_RE.captures(msg4).unwrap();
+        assert_eq!(caps4.name("filename").unwrap().as_str(), "Exceptional_C++_-_47_Engineering_Puzzles,_Programming_Problems,_and_Solutions.pdf");
+        assert_eq!(caps4.name("ip").unwrap().as_str(), "2985527814");
+        assert_eq!(caps4.name("port").unwrap().as_str(), "10052");
+        assert_eq!(caps4.name("size").unwrap().as_str(), "11717617");
+
         // Test invalid messages
         assert!(!DCC_SEND_RE.is_match("PRIVMSG #channel :hello"));
         assert!(!DCC_SEND_RE.is_match("DCC SEND"));
+
+        // Test NOTICE messages (announcements) should NOT match - missing port/size
+        let notice_msg = ":Bsk!~abc@177.243.138.6 NOTICE bworm9084 :DCC Send Exceptional C++ - 47 Engineering Puzzles, Programming Problems, and Solutions.pdf (177.243.138.6)";
+        assert!(!DCC_SEND_RE.is_match(notice_msg),
+            "NOTICE message should NOT match - it has filename with spaces and IP in parentheses, but no port/size");
+
+        // Verify captures returns None for NOTICE
+        assert!(DCC_SEND_RE.captures(notice_msg).is_none(),
+            "NOTICE message should have no captures");
+    }
+
+    #[test]
+    fn test_notice_vs_privmsg_dcc() {
+        // This test specifically checks that we don't confuse announcement with actual transfer
+        let notice = ":Bsk!~abc@177.243.138.6 NOTICE bworm9084 :DCC Send Exceptional C++ - 47 Engineering Puzzles, Programming Problems, and Solutions.pdf (177.243.138.6)";
+        let privmsg = ":Bsk!~abc@177.243.138.6 PRIVMSG bworm9084 :DCC SEND Exceptional_C++_-_47_Engineering_Puzzles,_Programming_Problems,_and_Solutions.pdf 2985527814 10052 11717617";
+
+        // NOTICE should not match
+        assert!(!DCC_SEND_RE.is_match(notice), "NOTICE is just an announcement");
+
+        // PRIVMSG should match
+        assert!(DCC_SEND_RE.is_match(privmsg), "PRIVMSG has actual transfer details");
+
+        // Both contain "DCC SEND" text
+        assert!(notice.to_uppercase().contains("DCC SEND"));
+        assert!(privmsg.to_uppercase().contains("DCC SEND"));
+
+        // But only PRIVMSG matches the pattern
+        assert!(DCC_SEND_RE.captures(notice).is_none());
+        assert!(DCC_SEND_RE.captures(privmsg).is_some());
+    }
+
+    #[test]
+    fn test_dcc_with_ctcp_delimiters() {
+        // Test DCC SEND with CTCP delimiters (\x01)
+        // This is the REAL format sent by IRC servers
+        let with_ctcp = ":SearchOok!ook@OokMP3.users.undernet.org PRIVMSG bworm55417 :\x01DCC SEND SearchBot_results_for__rust_program.txt.zip 1544743952 2044 807\x01\r\n";
+
+        println!("Testing CTCP-wrapped DCC SEND: {:?}", with_ctcp);
+        println!("Line contains 'DCC SEND': {}", with_ctcp.to_uppercase().contains("DCC SEND"));
+        println!("Regex matches: {}", DCC_SEND_RE.is_match(with_ctcp));
+
+        if let Some(caps) = DCC_SEND_RE.captures(with_ctcp) {
+            println!("Captured filename: {:?}", caps.name("filename").map(|m| m.as_str()));
+            println!("Captured ip: {:?}", caps.name("ip").map(|m| m.as_str()));
+            println!("Captured port: {:?}", caps.name("port").map(|m| m.as_str()));
+            println!("Captured size: {:?}", caps.name("size").map(|m| m.as_str()));
+        } else {
+            println!("NO CAPTURES!");
+        }
+
+        assert!(DCC_SEND_RE.is_match(with_ctcp), "Should match DCC SEND with CTCP delimiters");
+
+        let caps = DCC_SEND_RE.captures(with_ctcp).unwrap();
+        assert_eq!(caps.name("filename").unwrap().as_str(), "SearchBot_results_for__rust_program.txt.zip");
+        assert_eq!(caps.name("ip").unwrap().as_str(), "1544743952");
+        assert_eq!(caps.name("port").unwrap().as_str(), "2044");
+        assert_eq!(caps.name("size").unwrap().as_str(), "807");
     }
 
     #[test]
