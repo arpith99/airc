@@ -169,10 +169,12 @@ impl IrcClient {
 async fn init(client: Arc<IrcClient>) -> Result<()> {
     debug!("Sending IRC registration");
     client.sender.send("CAP END\r\n".to_string()).await?;
+
     client
         .sender
         .send(format!("NICK {}\r\n", client.nickname))
         .await?;
+
     client
         .sender
         .send(format!(
@@ -180,6 +182,7 @@ async fn init(client: Arc<IrcClient>) -> Result<()> {
             client.username, client.nickname, client.config.server, client.realname
         ))
         .await?;
+
     Ok(())
 }
 
@@ -205,6 +208,7 @@ async fn write(
             exit(0);
         }
     }
+
     Ok(())
 }
 
@@ -331,6 +335,7 @@ async fn cli(client: Arc<IrcClient>) -> Result<()> {
             client.sender.send(message).await?;
         }
     }
+
     Ok(())
 }
 
@@ -552,6 +557,7 @@ async fn dcc_receive(
 
     // Use safe path construction
     let file_path = safe_file_path(download_path, filename)?;
+
     let mut file = tokio::fs::File::create(&file_path)
         .await
         .map_err(|e| format!("Failed to create file '{}': {}", file_path.display(), e))?;
@@ -650,6 +656,11 @@ fn create_pong_response(line: &str) -> Option<String> {
 
 // Handle DCC SEND request by spawning download task
 async fn handle_dcc_send_request(client: &Arc<IrcClient>, line: &str) {
+    // Only process if line contains DCC SEND to avoid excessive regex checking
+    if !line.to_uppercase().contains("DCC SEND") {
+        return;
+    }
+
     if let Some(caps) = DCC_SEND_RE.captures(line) {
         // Extract captures safely - regex guarantees these exist if it matched
         let filename = caps.name("filename").map(|m| m.as_str().to_string());
@@ -658,6 +669,8 @@ async fn handle_dcc_send_request(client: &Arc<IrcClient>, line: &str) {
         let size = caps.name("size").map(|m| m.as_str().to_string());
 
         if let (Some(filename), Some(ip), Some(port), Some(size)) = (filename, ip, port, size) {
+            info!("✓ DCC SEND: {}, {} bytes", filename, size);
+
             print_line(
                 &format!("Received DCC SEND request for file: {}\n", filename),
                 true,
@@ -667,42 +680,63 @@ async fn handle_dcc_send_request(client: &Arc<IrcClient>, line: &str) {
                 true,
             );
 
-            // Spawn the ENTIRE download+processing in a separate task
-            // This prevents blocking the read loop during file transfer
+            // Spawn download task
             let client_clone = client.clone();
             let download_path = client.config.download_path.clone();
             let connection_timeout = client.config.connection_timeout_secs;
             let transfer_timeout = client.config.dcc_timeout_secs;
 
             // Track the spawned task for graceful shutdown
-            client.dcc_tasks.lock().await.spawn(async move {
+            let mut tasks = client.dcc_tasks.lock().await;
+            tasks.spawn(async move {
                 match dcc_receive(&filename, &ip, &port, &size, &download_path, connection_timeout, transfer_timeout).await {
                     Ok(fpath) => {
                         if let Err(e) = handle_dcc_file(client_clone, fpath).await {
+                            warn!("Error handling DCC file: {}", e);
                             print_line(&format!("Error handling DCC file: {}\n", e), true);
                         }
                     }
                     Err(e) => {
+                        warn!("Error receiving DCC file: {}", e);
                         print_line(&format!("Error receiving DCC file: {}\n", e), true);
                     }
                 }
             });
+        } else {
+            warn!("DCC SEND regex matched but failed to extract all fields");
+        }
+    } else {
+        // Line contains "DCC SEND" but regex failed
+        // This is expected for NOTICE announcements
+        if !line.contains(" NOTICE ") {
+            warn!("DCC SEND regex mismatch: {}", line.trim());
         }
     }
 }
 
 async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
+    let mut message_count = 0u64;
+    let mut last_heartbeat = std::time::Instant::now();
+
     loop {
-        let mut line = String::new();
-        let bytes_read = {
+        // Heartbeat every 60 seconds to show we're alive
+        if last_heartbeat.elapsed().as_secs() >= 60 {
+            info!("❤️  Heartbeat - processed {} messages", message_count);
+            last_heartbeat = std::time::Instant::now();
+        }
+
+        // Read raw bytes until newline (handles invalid UTF-8)
+        let (line, bytes_read) = {
             let mut reader = client.reader.lock().await;
             reader.read_line(&mut line).await?
         };
 
         if bytes_read == 0 {
+            warn!("Connection closed by server (0 bytes read)");
             break; // Connection closed
         }
 
+        message_count += 1;
         print_received_line(&line);
 
         // Handle PING/PONG
@@ -710,9 +744,21 @@ async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
             client.sender.send(pong).await?;
         }
 
+        // Check for DCC SEND messages
+        if line.to_uppercase().contains("DCC SEND") {
+            // Check if it's a NOTICE (announcement) or PRIVMSG (actual transfer)
+            if line.contains(" NOTICE ") {
+                info!("📢 DCC SEND announcement (NOTICE)");
+            } else if line.contains(" PRIVMSG ") {
+                info!("📥 DCC SEND transfer request (PRIVMSG)");
+            }
+        }
+
         // Handle DCC SEND requests
         handle_dcc_send_request(&client, &line).await;
     }
+
+    info!("Receive loop ended after {} messages", message_count);
     Ok(())
 }
 
@@ -753,6 +799,7 @@ async fn main() -> Result<()> {
     let (client, receiver) =
         IrcClient::new(config, &username, &nickname, &realname).await?;
 
+    info!("Spawning async tasks");
     let init_task = tokio::spawn(init(client.clone()));
     let write_task = tokio::spawn(write(client.clone(), receiver));
     let cli_task = tokio::spawn(cli(client.clone()));
@@ -768,11 +815,13 @@ async fn main() -> Result<()> {
     receive_result??;
 
     // Wait for all DCC tasks to complete before exiting
+    info!("Main tasks completed, waiting for DCC transfers");
     print_line("Waiting for DCC transfers to complete...\n", true);
     let mut tasks = client.dcc_tasks.lock().await;
     while tasks.join_next().await.is_some() {
         // All tasks joined
     }
+    info!("All DCC transfers completed, exiting");
     print_line("All DCC transfers completed.\n", true);
 
     Ok(())
