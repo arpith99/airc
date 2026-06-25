@@ -312,6 +312,48 @@ async fn handle_dcc_send_request(client: &Arc<IrcClient>, line: &str) {
     }
 }
 
+// IRC membership parsing for the user-list pane.
+pub(crate) enum Membership {
+    Joined(String),
+    Left(String),
+}
+
+// Parse an RPL_NAMREPLY (353): the trailing " :" segment is the space-separated
+// nick list; strip channel-status prefixes.
+pub(crate) fn parse_names_reply(line: &str) -> Option<Vec<String>> {
+    if !line.contains(" 353 ") {
+        return None;
+    }
+    let names = line.rsplit_once(" :")?.1;
+    let users: Vec<String> = names
+        .split_whitespace()
+        .map(|n| n.trim_start_matches(['@', '+', '%', '&', '~']).to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if users.is_empty() {
+        None
+    } else {
+        Some(users)
+    }
+}
+
+// Parse a JOIN/PART/QUIT line into the nick that joined or left.
+pub(crate) fn parse_membership(line: &str) -> Option<Membership> {
+    let rest = line.strip_prefix(':')?;
+    let mut parts = rest.split_whitespace();
+    let source = parts.next()?;
+    let command = parts.next()?;
+    let nick = source.split('!').next()?.to_string();
+    if nick.is_empty() {
+        return None;
+    }
+    match command {
+        "JOIN" => Some(Membership::Joined(nick)),
+        "PART" | "QUIT" => Some(Membership::Left(nick)),
+        _ => None,
+    }
+}
+
 pub(crate) async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
     let mut message_count = 0u64;
     let mut last_heartbeat = std::time::Instant::now();
@@ -420,5 +462,43 @@ mod tests {
 
         // Every spawned task must have run to completion before drain returned.
         assert_eq!(counter.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn test_parse_names_reply() {
+        let line = ":irc.example.com 353 mynick = #bookz :alice @bob +carol\r\n";
+        assert_eq!(
+            parse_names_reply(line),
+            Some(vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "carol".to_string()
+            ])
+        );
+        assert_eq!(parse_names_reply(":x PRIVMSG #c :hi"), None);
+    }
+
+    #[test]
+    fn test_parse_membership_join() {
+        let line = ":alice!~a@host JOIN :#bookz\r\n";
+        assert!(matches!(parse_membership(line), Some(Membership::Joined(n)) if n == "alice"));
+    }
+
+    #[test]
+    fn test_parse_membership_part_and_quit() {
+        assert!(matches!(
+            parse_membership(":bob!~b@host PART #bookz :bye\r\n"),
+            Some(Membership::Left(n)) if n == "bob"
+        ));
+        assert!(matches!(
+            parse_membership(":carol!~c@host QUIT :Ping timeout\r\n"),
+            Some(Membership::Left(n)) if n == "carol"
+        ));
+    }
+
+    #[test]
+    fn test_parse_membership_ignores_other() {
+        assert!(parse_membership(":irc 353 mynick = #c :a b").is_none());
+        assert!(parse_membership("PING :server").is_none());
     }
 }
