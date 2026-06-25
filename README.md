@@ -5,6 +5,7 @@ A specialized IRC client for downloading books via DCC file transfers. Built wit
 ## Features
 
 - **IRC Protocol**: Connect, authenticate, join channels, PING/PONG handling
+- **TLS**: Optional encrypted control connection (rustls) with certificate verification
 - **DCC Transfers**: Concurrent file downloads with streaming and ACK protocol
 - **Search**: IRC-based book search with local filtering
 - **Configuration**: TOML config file with CLI overrides
@@ -31,11 +32,15 @@ username = "myuser"  # Optional, generates random if not set
 download_path = "./downloads/"
 connection_timeout_secs = 30
 dcc_timeout_secs = 300
+tls = false          # Set true to connect over TLS
+port = 6667          # Optional; defaults to 6667, or 6697 when tls = true
 ```
 
 Override with CLI arguments:
 ```bash
 airc --server irc.example.com --channel "#mychannel" --username myuser
+airc --server irc.libera.chat --tls          # connects on 6697
+airc --server irc.example.com --tls --port 7000
 ```
 
 ## Commands

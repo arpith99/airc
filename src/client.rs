@@ -10,15 +10,18 @@ use crate::ui::{print_line, print_received_line, print_sent_line};
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tracing::{debug, info, warn};
 
-const IRC_PORT: u16 = 6667;
 const CHANNEL_BUFFER_SIZE: usize = 100;
 const QUIT_DELAY_MS: u64 = 100;
+
+// The control connection may be plaintext TCP or a TLS stream, so the read and
+// write halves are stored as trait objects rather than concrete socket types.
+type BoxedReader = Box<dyn AsyncRead + Unpin + Send>;
+type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
 #[derive(Clone)]
 pub(crate) struct IrcClient {
@@ -26,11 +29,38 @@ pub(crate) struct IrcClient {
     username: String,
     nickname: String,
     realname: String,
-    reader: Arc<tokio::sync::Mutex<BufReader<OwnedReadHalf>>>,
-    writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    reader: Arc<tokio::sync::Mutex<BufReader<BoxedReader>>>,
+    writer: Arc<tokio::sync::Mutex<BoxedWriter>>,
     sender: Sender<String>,
     pub(crate) search_results: Arc<tokio::sync::Mutex<Vec<String>>>,
     pub(crate) dcc_tasks: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
+}
+
+// Perform a TLS handshake over an established TCP connection, verifying the
+// server certificate against the bundled Mozilla root store.
+async fn tls_connect(
+    server: &str,
+    tcp: TcpStream,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    use tokio_rustls::TlsConnector;
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let tls_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    let connector = TlsConnector::from(Arc::new(tls_config));
+    let domain = ServerName::try_from(server.to_string())
+        .map_err(|e| AircError::Connection(format!("Invalid server name '{}': {}", server, e)))?;
+
+    connector
+        .connect(domain, tcp)
+        .await
+        .map_err(|e| AircError::Connection(format!("TLS handshake with {} failed: {}", server, e)))
 }
 
 impl IrcClient {
@@ -43,7 +73,7 @@ impl IrcClient {
         info!("Connecting to {} ({})", config.server, config.channel);
 
         // Connect with timeout and retry logic
-        let server_addr = format!("{}:{}", config.server, IRC_PORT);
+        let server_addr = format!("{}:{}", config.server, config.port());
         let timeout_secs = config.connection_timeout_secs;
         let server_name = config.server.clone();
 
@@ -69,7 +99,18 @@ impl IrcClient {
         .await?;
 
         let (sender, receiver) = mpsc::channel(CHANNEL_BUFFER_SIZE);
-        let (reader, writer) = stream.into_split();
+
+        // Optionally upgrade to TLS, then erase the concrete stream type so the
+        // rest of the client treats plaintext and TLS connections identically.
+        let (reader, writer): (BoxedReader, BoxedWriter) = if config.tls {
+            info!("Establishing TLS connection to {}", config.server);
+            let tls = tls_connect(&config.server, stream).await?;
+            let (r, w) = tokio::io::split(tls);
+            (Box::new(r), Box::new(w))
+        } else {
+            let (r, w) = tokio::io::split(stream);
+            (Box::new(r), Box::new(w))
+        };
         let reader = BufReader::new(reader);
 
         // Ensure download directory exists

@@ -22,7 +22,16 @@ pub struct Config {
 
     #[serde(default = "default_dcc_timeout")]
     pub dcc_timeout_secs: u64,
+
+    #[serde(default)]
+    pub tls: bool,
+
+    #[serde(default)]
+    pub port: Option<u16>,
 }
+
+const DEFAULT_PORT: u16 = 6667;
+const DEFAULT_TLS_PORT: u16 = 6697;
 
 fn default_server() -> String {
     "irc.undernet.org".to_string()
@@ -53,11 +62,20 @@ impl Default for Config {
             download_path: default_download_path(),
             connection_timeout_secs: default_connection_timeout(),
             dcc_timeout_secs: default_dcc_timeout(),
+            tls: false,
+            port: None,
         }
     }
 }
 
 impl Config {
+    /// Resolve the port to connect on. Falls back to the conventional IRC
+    /// ports: 6667 for plaintext, 6697 for TLS.
+    pub fn port(&self) -> u16 {
+        self.port
+            .unwrap_or(if self.tls { DEFAULT_TLS_PORT } else { DEFAULT_PORT })
+    }
+
     /// Load configuration from file, or create default if not found
     pub async fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
@@ -91,6 +109,8 @@ impl Config {
         channel: Option<String>,
         username: Option<String>,
         download_path: Option<String>,
+        tls: bool,
+        port: Option<u16>,
     ) -> Self {
         if let Some(s) = server {
             self.server = s;
@@ -103,6 +123,14 @@ impl Config {
         }
         if let Some(d) = download_path {
             self.download_path = d;
+        }
+        // --tls can enable TLS but absence of the flag never disables a
+        // config-file setting.
+        if tls {
+            self.tls = true;
+        }
+        if let Some(p) = port {
+            self.port = Some(p);
         }
         self
     }
@@ -121,17 +149,40 @@ mod tests {
         assert_eq!(config.download_path, "./downloads/");
         assert_eq!(config.connection_timeout_secs, 30);
         assert_eq!(config.dcc_timeout_secs, 300);
+        assert!(!config.tls);
+        assert_eq!(config.port, None);
+    }
+
+    #[test]
+    fn test_port_defaults_to_plaintext() {
+        let config = Config::default();
+        assert_eq!(config.port(), 6667);
+    }
+
+    #[test]
+    fn test_port_defaults_to_tls_when_enabled() {
+        let config = Config {
+            tls: true,
+            ..Config::default()
+        };
+        assert_eq!(config.port(), 6697);
+    }
+
+    #[test]
+    fn test_explicit_port_overrides_tls_default() {
+        let config = Config {
+            tls: true,
+            port: Some(1234),
+            ..Config::default()
+        };
+        assert_eq!(config.port(), 1234);
     }
 
     #[test]
     fn test_merge_with_args_server() {
         let config = Config::default();
-        let merged = config.merge_with_args(
-            Some("irc.example.com".to_string()),
-            None,
-            None,
-            None,
-        );
+        let merged =
+            config.merge_with_args(Some("irc.example.com".to_string()), None, None, None, false, None);
         assert_eq!(merged.server, "irc.example.com");
         assert_eq!(merged.channel, "#bookz");
     }
@@ -144,19 +195,25 @@ mod tests {
             Some("#test".to_string()),
             Some("testuser".to_string()),
             Some("/tmp/downloads".to_string()),
+            true,
+            Some(6697),
         );
         assert_eq!(merged.server, "irc.test.org");
         assert_eq!(merged.channel, "#test");
         assert_eq!(merged.username, Some("testuser".to_string()));
         assert_eq!(merged.download_path, "/tmp/downloads");
+        assert!(merged.tls);
+        assert_eq!(merged.port, Some(6697));
     }
 
     #[test]
     fn test_merge_with_args_partial() {
         let config = Config::default();
-        let merged = config.merge_with_args(None, Some("#custom".to_string()), None, None);
+        let merged =
+            config.merge_with_args(None, Some("#custom".to_string()), None, None, false, None);
         assert_eq!(merged.server, "irc.undernet.org");
         assert_eq!(merged.channel, "#custom");
         assert_eq!(merged.username, None);
+        assert!(!merged.tls);
     }
 }

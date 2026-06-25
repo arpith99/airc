@@ -33,6 +33,12 @@ struct Args {
     /// Download path for DCC files
     #[clap(short, long)]
     download_path: Option<String>,
+    /// Connect using TLS/SSL
+    #[clap(long)]
+    tls: bool,
+    /// Port to connect on (defaults to 6667, or 6697 with --tls)
+    #[clap(short, long)]
+    port: Option<u16>,
 }
 
 #[tokio::main]
@@ -56,7 +62,14 @@ async fn main() -> Result<()> {
             warn!("Failed to load config: {}, using defaults", e);
             Config::default()
         })
-        .merge_with_args(args.server, args.channel, args.username, args.download_path);
+        .merge_with_args(
+            args.server,
+            args.channel,
+            args.username,
+            args.download_path,
+            args.tls,
+            args.port,
+        );
 
     debug!("Using config: {:?}", config);
 
