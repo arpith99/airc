@@ -67,9 +67,9 @@ pub(crate) enum UiEvent {
 **Files:**
 - Modify: `Cargo.toml`
 
-- [ ] **Step 1: Add ratatui + crossterm, remove colored**
+- [ ] **Step 1: Add ratatui + crossterm**
 
-Edit `Cargo.toml` `[dependencies]`: delete the `colored = "3.0"` line (only `ui.rs` used it) and add the two TUI crates. Resulting block:
+Edit `Cargo.toml` `[dependencies]`: add the two TUI crates. **Keep `colored = "3.0"` for now** — `src/ui.rs` still imports it and is not deleted until Task 11, so removing it here would break the build. `colored` is removed in Task 11 alongside `ui.rs`. Resulting block:
 
 ```toml
 [dependencies]
@@ -85,6 +85,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+colored = "3.0"
 directories = "5.0"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "1.0.8"
@@ -2264,13 +2265,15 @@ pub(crate) use app::MessageType;
 pub(crate) use log_writer::UiMakeWriter;
 ```
 
-- [ ] **Step 3: Delete the old stdout printer**
+- [ ] **Step 3: Delete the old stdout printer and its dependency**
 
 ```bash
-jj file untrack src/ui.rs 2>/dev/null; rm src/ui.rs
+rm src/ui.rs
 ```
 
 (Removing the file is enough; jj will record the deletion. The `mod ui;` line is already gone from the new `main.rs`.)
+
+Now that `ui.rs` is gone, remove its only consumer — the `colored` crate — from `Cargo.toml`. Delete the `colored = "3.0"` line from `[dependencies]`. (`chrono` stays — `tui/app.rs` uses it.)
 
 - [ ] **Step 4: Build the whole crate**
 
