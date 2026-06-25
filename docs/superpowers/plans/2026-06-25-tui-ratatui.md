@@ -1565,18 +1565,52 @@ pub(crate) fn process_command(command: &str, channel: &str) -> Option<String> {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Bridge the one caller so the crate still compiles**
 
-Run: `cargo test --lib commands`
-Expected: PASS — the 4 new tests plus the existing `test_search_regex`/`test_entry_regex`. The crate as a whole will NOT build yet (Task 9 still references the old `process_command`/`handle_search_results` in `client.rs`); `--lib commands` only compiles what's needed for these unit tests if the rest compiles. If the full crate fails to build due to `client.rs`, that's expected — proceed; this module's logic is correct. (To check this module in isolation without the broken callers, it is acceptable to defer running until after Task 9. If so, note it and move on.)
+The old `process_command` was `async fn(Arc<IrcClient>, &str)` and `client::cli` calls it plus `handle_search_results`. To keep the build green (the full cut-over of `cli` happens in Task 9), make a minimal bridging edit to `src/client.rs`:
 
-- [ ] **Step 5: Commit**
+1. Change the import line
+   ```rust
+   use crate::commands::{handle_search_results, process_command};
+   ```
+   to
+   ```rust
+   use crate::commands::process_command;
+   ```
+
+2. In `cli`, replace the local-command + IRC-command block:
+   ```rust
+        // Handle local commands (don't send to IRC)
+        if let Some(search_term) = trimmed.strip_prefix("/ss ") {
+            handle_search_results(client.clone(), search_term).await;
+            continue;
+        }
+
+        // Handle IRC commands (generate messages to send)
+        if let Some(message) = process_command(client.clone(), trimmed).await {
+            client.sender.send(message).await?;
+        }
+   ```
+   with the pure-call version:
+   ```rust
+        // Handle IRC commands (generate messages to send)
+        if let Some(message) = process_command(trimmed, &client.config.channel) {
+            client.sender.send(message).await?;
+        }
+   ```
+
+This temporarily drops `/ss` from the stdin path; it is fully removed (along with `cli`) in Task 9, where `/ss` is reimplemented in the render loop. Nothing else in `client.rs` uses `handle_search_results`.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cargo test 2>&1 | tail -20`
+Expected: the whole crate compiles and ALL tests pass — the 4 new `commands` helper tests, the existing `test_search_regex`/`test_entry_regex`, and the full prior suite. (Transitional dead-code warnings for not-yet-wired `tui` items remain expected.)
+
+- [ ] **Step 6: Commit**
 
 ```bash
 jj commit -m "Make process_command pure; add entry/local-search helpers"
 ```
-
-Note: the working copy may not compile as a whole between Tasks 7–11 because callers are updated in Task 9. Commit anyway to keep logical units separate; the green build lands at the end of Task 11.
 
 ---
 
