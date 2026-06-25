@@ -4,6 +4,7 @@ mod config;
 mod dcc;
 mod error;
 mod net;
+mod tui;
 mod ui;
 
 use clap::Parser;
