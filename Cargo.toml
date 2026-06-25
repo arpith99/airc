@@ -20,4 +20,6 @@ toml = "0.8"
 directories = "5.0"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "1.0.8"
+ratatui = "0.29"
+crossterm = "0.28"
 
