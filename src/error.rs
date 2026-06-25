@@ -12,15 +12,6 @@ pub enum AircError {
     #[error("Connection timed out: {0}")]
     Timeout(String),
 
-    #[error("IRC protocol error: {0}")]
-    Protocol(String),
-
-    #[error("DCC transfer error: {0}")]
-    DccTransfer(String),
-
-    #[error("File operation error: {0}")]
-    FileOperation(String),
-
     #[error("Configuration error: {0}")]
     Config(String),
 

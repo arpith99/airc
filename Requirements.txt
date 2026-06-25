@@ -92,7 +92,7 @@ src/
 - **CLI Parsing:** clap (derive)
 - **Config Format:** TOML (serde)
 - **Networking:** tokio::net::TcpStream
-- **File Compression:** zip, bzip2, zstd
+- **File Compression:** zip
 - **Regex:** regex with once_cell for compiled patterns
 - **Terminal Colors:** colored
 - **Random Generation:** rand
@@ -105,7 +105,8 @@ src/
 - IP address conversion tests
 - Regex pattern matching tests (PING, DCC SEND, search, entry)
 - Command processing validation
-- 17 tests with 100% pass rate
+- Graceful DCC task draining on shutdown
+- 20 tests with 100% pass rate
 
 ## Design Decisions
 
@@ -179,11 +180,11 @@ src/
 - Input validation on entry numbers
 - Timeout protection against stalled transfers
 - Path safety in file operations
+- Filename sanitization on DCC SEND (rejects path separators, traversal, null bytes, reserved names)
+- Size limits on downloads (10GB cap)
 - No arbitrary command execution
 
 ### Future Work
-- Validate file paths from DCC SEND (prevent path traversal)
-- Size limits on downloads
 - Hash verification for downloaded files
 - Sandboxing for file extraction
 - Rate limiting to prevent abuse

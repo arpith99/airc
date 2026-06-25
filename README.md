@@ -80,7 +80,7 @@ airc --server irc.example.com --channel "#mychannel" --username myuser
 cargo test
 ```
 
-17 tests covering error handling, config merging, IP conversion, regex patterns, and command processing.
+20 tests covering error handling, config merging, IP conversion, regex patterns, command processing, and DCC task draining.
 
 ## Dependencies
 

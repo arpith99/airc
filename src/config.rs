@@ -73,22 +73,6 @@ impl Config {
         }
     }
 
-    /// Save configuration to file
-    pub async fn save(&self) -> Result<()> {
-        let config_path = Self::config_path()?;
-
-        if let Some(parent) = config_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        let contents = toml::to_string_pretty(self)
-            .map_err(|e| AircError::Config(format!("Failed to serialize config: {}", e)))?;
-
-        tokio::fs::write(&config_path, contents).await?;
-        tracing::info!("Saved config to {}", config_path.display());
-        Ok(())
-    }
-
     /// Get the config file path
     fn config_path() -> Result<PathBuf> {
         if let Some(proj_dirs) = ProjectDirs::from("com", "airc", "airc") {
