@@ -202,9 +202,13 @@ async fn write(
         // Check if this is a QUIT command (case-insensitive, no allocation)
         if message.len() >= 4 && message[..4].eq_ignore_ascii_case("QUIT") {
             print_line("Exiting...\n", true);
-            print_line("Goodbye!\n", true);
-            // Give other tasks time to clean up
+            // Give the server a moment to process the QUIT message.
             tokio::time::sleep(tokio::time::Duration::from_millis(QUIT_DELAY_MS)).await;
+            // Wait for any in-flight DCC downloads to finish before exiting so a
+            // /quit doesn't truncate files still being written to disk.
+            print_line("Waiting for DCC transfers to complete...\n", true);
+            drain_dcc_tasks(&client.dcc_tasks).await;
+            print_line("Goodbye!\n", true);
             exit(0);
         }
     }
@@ -769,6 +773,14 @@ async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
     Ok(())
 }
 
+// Wait for all in-flight DCC download tasks to finish.
+async fn drain_dcc_tasks(tasks: &Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>) {
+    let mut tasks = tasks.lock().await;
+    while tasks.join_next().await.is_some() {
+        // Each task joined.
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing/logging
@@ -824,10 +836,7 @@ async fn main() -> Result<()> {
     // Wait for all DCC tasks to complete before exiting
     info!("Main tasks completed, waiting for DCC transfers");
     print_line("Waiting for DCC transfers to complete...\n", true);
-    let mut tasks = client.dcc_tasks.lock().await;
-    while tasks.join_next().await.is_some() {
-        // All tasks joined
-    }
+    drain_dcc_tasks(&client.dcc_tasks).await;
     info!("All DCC transfers completed, exiting");
     print_line("All DCC transfers completed.\n", true);
 
@@ -837,6 +846,30 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_drain_dcc_tasks_waits_for_all() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let tasks = Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new()));
+
+        {
+            let mut set = tasks.lock().await;
+            for _ in 0..5 {
+                let c = counter.clone();
+                set.spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    c.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+        }
+
+        drain_dcc_tasks(&tasks).await;
+
+        // Every spawned task must have run to completion before drain returned.
+        assert_eq!(counter.load(Ordering::SeqCst), 5);
+    }
 
     #[test]
     fn test_decode_dcc_ip_address() {
