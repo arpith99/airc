@@ -1,6 +1,7 @@
 pub(crate) mod app;
 mod download;
 mod log_writer;
+mod render;
 
 pub(crate) use app::MessageType;
 
