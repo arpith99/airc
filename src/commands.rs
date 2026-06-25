@@ -1,8 +1,5 @@
-use crate::client::IrcClient;
-use crate::ui::print_line;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::sync::Arc;
 
 // Compile regexes once at startup
 static SEARCH_RE: Lazy<Regex> =
@@ -10,53 +7,46 @@ static SEARCH_RE: Lazy<Regex> =
 
 static ENTRY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^/(?P<entry_num>\d+)$").unwrap());
 
-// Case-insensitive substring search without allocation
-fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+/// Case-insensitive substring search without allocating per-char.
+pub(crate) fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
-
     let haystack_lower: String = haystack.chars().flat_map(|c| c.to_lowercase()).collect();
     let needle_lower: String = needle.chars().flat_map(|c| c.to_lowercase()).collect();
     haystack_lower.contains(&needle_lower)
 }
 
-// Local command to search the search results
-pub(crate) async fn handle_search_results(client: Arc<IrcClient>, search_term: &str) {
-    // Collect matching indices and lines to avoid holding lock during I/O
-    let matches: Vec<(usize, String)> = {
-        let list = client.search_results.lock().await;
-        list.iter()
-            .enumerate()
-            .filter(|(_, book_line)| contains_ignore_case(book_line, search_term))
-            .map(|(i, book_line)| (i, book_line.clone()))
-            .collect()
-    };
-
-    if matches.is_empty() {
-        print_line(&format!("No results found for '{}'\n", search_term), true);
-    } else {
-        for (i, book_line) in matches {
-            print_line(&format!("{}: {}\n", i, book_line), true);
-        }
-    }
+/// `/ss <term>` — local filter over already-downloaded results. Returns the term.
+pub(crate) fn local_search_term(input: &str) -> Option<&str> {
+    input.strip_prefix("/ss ").map(str::trim)
 }
 
-// Returns Option<String> - Some(msg) if should send to IRC, None if shouldn't
-pub(crate) async fn process_command(client: Arc<IrcClient>, command: &str) -> Option<String> {
-    // JOIN command
+/// `/<n>` — request the n-th book entry. Returns the parsed index.
+pub(crate) fn entry_number(input: &str) -> Option<usize> {
+    ENTRY_RE
+        .captures(input)?
+        .name("entry_num")?
+        .as_str()
+        .parse()
+        .ok()
+}
+
+/// Map a user input line to the IRC string to send, or `None` if nothing
+/// should be sent. Pure: `/ss` and `/<n>` are handled by the caller (the render
+/// loop) since they depend on the in-memory book list.
+pub(crate) fn process_command(command: &str, channel: &str) -> Option<String> {
+    // JOIN
     if command == "/join" || command == "/j" {
-        return Some(format!("JOIN {}\r\n", client.config.channel));
+        return Some(format!("JOIN {}\r\n", channel));
     }
 
-    // QUIT command
+    // QUIT (with optional message)
     if command.starts_with("/quit") || command.starts_with("/q ") || command == "/q" {
-        // Extract optional quit message
         let quit_msg = command
             .strip_prefix("/quit ")
             .or_else(|| command.strip_prefix("/q "))
             .unwrap_or("");
-
         return if quit_msg.is_empty() {
             Some("QUIT\r\n".to_string())
         } else {
@@ -64,45 +54,13 @@ pub(crate) async fn process_command(client: Arc<IrcClient>, command: &str) -> Op
         };
     }
 
-    // SEARCH command
+    // SEARCH
     if let Some(caps) = SEARCH_RE.captures(command) {
         let search_term = caps.name("search_term").unwrap().as_str();
-        print_line(&format!("Searching for: {}\n", search_term), true);
-        return Some(format!(
-            "PRIVMSG {} :@search {}\r\n",
-            client.config.channel, search_term
-        ));
+        return Some(format!("PRIVMSG {} :@search {}\r\n", channel, search_term));
     }
 
-    // ENTRY NUMBER selection
-    if let Some(caps) = ENTRY_RE.captures(command) {
-        let entry_str = caps.name("entry_num").unwrap().as_str();
-
-        match entry_str.parse::<usize>() {
-            Ok(entry_num) => {
-                print_line(&format!("Requesting entry number: {}\n", entry_num), true);
-
-                // Look up the actual book entry
-                let results = client.search_results.lock().await;
-                if let Some(book_entry) = results.get(entry_num) {
-                    print_line(&format!("Book entry: {}\n", book_entry), true);
-                    return Some(format!("PRIVMSG {} :{}\r\n", client.config.channel, book_entry));
-                } else {
-                    print_line(
-                        &format!("Entry number {} not found in search results\n", entry_num),
-                        true,
-                    );
-                    return None; // Don't send anything
-                }
-            }
-            Err(_) => {
-                print_line(&format!("Invalid entry number: '{}'\n", entry_str), true);
-                return None;
-            }
-        }
-    }
-
-    // Default: treat as raw IRC command
+    // Default: raw IRC command (strip a single leading slash)
     Some(format!(
         "{}\r\n",
         command.strip_prefix('/').unwrap_or(command).trim()
@@ -151,5 +109,45 @@ mod tests {
         // Test invalid
         assert!(!ENTRY_RE.is_match("/abc"));
         assert!(!ENTRY_RE.is_match("123"));
+    }
+
+    #[test]
+    fn test_process_command_join_and_quit() {
+        assert_eq!(
+            process_command("/join", "#bookz"),
+            Some("JOIN #bookz\r\n".to_string())
+        );
+        assert_eq!(process_command("/q", "#bookz"), Some("QUIT\r\n".to_string()));
+        assert_eq!(
+            process_command("/quit bye now", "#bookz"),
+            Some("QUIT :bye now\r\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_process_command_search_and_raw() {
+        assert_eq!(
+            process_command("/s rust", "#bookz"),
+            Some("PRIVMSG #bookz :@search rust\r\n".to_string())
+        );
+        assert_eq!(
+            process_command("/whois bob", "#bookz"),
+            Some("whois bob\r\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_entry_number() {
+        assert_eq!(entry_number("/5"), Some(5));
+        assert_eq!(entry_number("/0"), Some(0));
+        assert_eq!(entry_number("/abc"), None);
+        assert_eq!(entry_number("5"), None);
+    }
+
+    #[test]
+    fn test_local_search_term() {
+        assert_eq!(local_search_term("/ss async"), Some("async"));
+        assert_eq!(local_search_term("/s async"), None);
+        assert_eq!(local_search_term("hello"), None);
     }
 }

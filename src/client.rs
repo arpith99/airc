@@ -1,4 +1,4 @@
-use crate::commands::{handle_search_results, process_command};
+use crate::commands::process_command;
 use crate::config::Config;
 use crate::dcc::{
     DCC_SEND_RE, SEARCHBOT_RESULTS_PREFIX, ZIP_EXTENSION, dcc_receive, read_lines_to_vec,
@@ -193,14 +193,8 @@ pub(crate) async fn cli(client: Arc<IrcClient>) -> Result<()> {
         }
         let trimmed = command.trim();
 
-        // Handle local commands (don't send to IRC)
-        if let Some(search_term) = trimmed.strip_prefix("/ss ") {
-            handle_search_results(client.clone(), search_term).await;
-            continue;
-        }
-
         // Handle IRC commands (generate messages to send)
-        if let Some(message) = process_command(client.clone(), trimmed).await {
+        if let Some(message) = process_command(trimmed, &client.config.channel) {
             client.sender.send(message).await?;
         }
     }
