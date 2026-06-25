@@ -70,7 +70,12 @@ airc --server irc.example.com --channel "#mychannel" --username myuser
 
 ## Architecture
 
-- **src/main.rs** - IRC protocol, DCC handling, command processing
+- **src/main.rs** - CLI parsing, config wiring, task orchestration
+- **src/client.rs** - `IrcClient`, connection/registration, task loops, IRC receive & DCC dispatch
+- **src/dcc.rs** - DCC file transfer, filename sanitization, unzip
+- **src/commands.rs** - User command parsing and local search
+- **src/net.rs** - Network retry with exponential backoff
+- **src/ui.rs** - Colored terminal output
 - **src/error.rs** - Custom error types
 - **src/config.rs** - Configuration management
 

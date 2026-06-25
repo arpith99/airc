@@ -54,7 +54,12 @@ interactive command-line interface with search capabilities and concurrent downl
 ### Module Structure
 ```
 src/
-├── main.rs          # Main application logic and protocol handling
+├── main.rs          # CLI parsing, config wiring, task orchestration
+├── client.rs        # IrcClient, connection/registration, task loops, IRC + DCC dispatch
+├── dcc.rs           # DCC file transfer, filename sanitization, unzip
+├── commands.rs      # User command parsing and local search
+├── net.rs           # Network retry with exponential backoff
+├── ui.rs            # Colored terminal output
 ├── error.rs         # Error types (AircError enum with From implementations)
 └── config.rs        # Configuration loading and merging
 ```
