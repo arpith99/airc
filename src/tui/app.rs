@@ -1,17 +1,13 @@
 //! TUI application state: messages, panes, scrolling, and input handling.
 
-use std::time::Duration;
-
 use chrono::{DateTime, Local};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
 
 use crate::config::Config;
-use crate::error::Result;
 use super::download::DownloadProgress;
 
 /// Maximum messages retained before the oldest are dropped.
@@ -326,26 +322,20 @@ impl App {
         }
     }
 
-    pub fn handle_events(&mut self, areas: &Areas) -> Result<Option<String>> {
-        if !event::poll(Duration::from_millis(10))? {
-            return Ok(None);
-        }
-        let mut submitted = None;
-        loop {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(line) = self.handle_key_event(key) {
-                        submitted = Some(line);
-                    }
-                }
-                Event::Mouse(mouse) => self.handle_mouse_event(mouse, areas),
-                _ => {}
+    /// Apply a single terminal input event, returning a submitted input line if
+    /// the event completed one. Reading events from the terminal is done off the
+    /// async render loop (a dedicated blocking thread) so that received IRC
+    /// traffic keeps rendering even while no keys are pressed; this method only
+    /// applies an already-read event to the state.
+    pub fn apply_terminal_event(&mut self, event: Event, areas: &Areas) -> Option<String> {
+        match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key_event(key),
+            Event::Mouse(mouse) => {
+                self.handle_mouse_event(mouse, areas);
+                None
             }
-            if !event::poll(Duration::from_millis(0))? {
-                break;
-            }
+            _ => None,
         }
-        Ok(submitted)
     }
 
     /// Returns Some(line) when the user submits input with Enter.
@@ -603,6 +593,28 @@ mod tests {
         a.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(a.input, "a");
         assert_eq!(a.cursor_position, 1);
+    }
+
+    #[test]
+    fn test_apply_terminal_event_routes_keys_and_ignores_release() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        let mut a = app();
+        let areas = Areas::default();
+        // A pressed char is inserted; nothing to submit yet.
+        let press = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(a.apply_terminal_event(press, &areas), None);
+        assert_eq!(a.input, "h");
+        // Enter submits the current line.
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.apply_terminal_event(enter, &areas), Some("h".to_string()));
+        // A key *release* event is ignored (avoids double input on Windows).
+        let release = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        assert_eq!(a.apply_terminal_event(release, &areas), None);
+        assert_eq!(a.input, "");
     }
 
     #[test]

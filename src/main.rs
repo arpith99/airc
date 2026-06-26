@@ -14,7 +14,32 @@ use rand::Rng;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::tui::{UiEvent, UiMakeWriter};
+use crate::tui::{MessageType, UiEvent, UiMakeWriter};
+
+/// Spawn a background task and, if it ends with an error, surface that error in
+/// the message pane instead of swallowing it. Returns the join handle so the
+/// caller can still await completion (used for the write task during shutdown).
+fn spawn_reporting<F>(
+    label: &'static str,
+    fut: F,
+    ui_tx: mpsc::Sender<UiEvent>,
+) -> tokio::task::JoinHandle<Result<()>>
+where
+    F: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let result = fut.await;
+        if let Err(ref e) = result {
+            let _ = ui_tx
+                .send(UiEvent::Log(
+                    MessageType::Error,
+                    format!("{label} task ended: {e}"),
+                ))
+                .await;
+        }
+        result
+    })
+}
 
 // Constants
 const DEFAULT_REALNAME: &str = "Book Worm";
@@ -96,9 +121,9 @@ async fn main() -> Result<()> {
         IrcClient::new(config, &username, &nickname, &realname, ui_tx.clone()).await?;
     let _ = ui_tx.send(UiEvent::Connected).await;
 
-    let _init = tokio::spawn(client::init(client.clone()));
-    let write_handle = tokio::spawn(client::write(client.clone(), receiver));
-    let _receive = tokio::spawn(client::receive_loop(client.clone()));
+    let _init = spawn_reporting("init", client::init(client.clone()), ui_tx.clone());
+    let write_handle = spawn_reporting("write", client::write(client.clone(), receiver), ui_tx.clone());
+    let _receive = spawn_reporting("receive", client::receive_loop(client.clone()), ui_tx.clone());
 
     tui::run(client, ui_rx, write_handle).await
 }

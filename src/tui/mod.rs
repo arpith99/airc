@@ -6,7 +6,8 @@ mod render;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc::Receiver;
+use crossterm::event::{self, Event};
+use tokio::sync::mpsc::{self, Receiver};
 use tokio::task::JoinHandle;
 
 use crate::client::{IrcClient, drain_dcc_tasks};
@@ -79,6 +80,7 @@ pub(crate) fn apply_event(app: &mut App, event: UiEvent) {
 
 const RENDER_TICK_MS: u64 = 16;
 const WRITE_DRAIN_TIMEOUT_SECS: u64 = 2;
+const INPUT_EVENT_BUFFER: usize = 256;
 
 /// Run the TUI render loop until the user quits or the server disconnects, then
 /// restore the terminal and drain in-flight DCC transfers.
@@ -92,9 +94,26 @@ pub(crate) async fn run(
     let mut app = App::new(client.config.clone());
     let mut areas = app::Areas::default();
 
+    // Read blocking terminal input on a dedicated OS thread and forward each
+    // event over a channel. crossterm's `event::read` parks the calling thread
+    // until input arrives, so doing it inline would stall the render loop and
+    // stop draining `ui_rx` between keystrokes (received IRC traffic would only
+    // appear when a key was pressed — observed on Windows). Keeping it off the
+    // async loop lets rendering tick on a timer regardless of keyboard activity.
+    let (input_tx, mut input_rx) = mpsc::channel::<Event>(INPUT_EVENT_BUFFER);
+    std::thread::spawn(move || {
+        while let Ok(event) = event::read() {
+            if input_tx.blocking_send(event).is_err() {
+                break; // render loop has exited; stop reading
+            }
+        }
+    });
+
     while !app.should_quit {
-        if let Some(input) = app.handle_events(&areas)? {
-            handle_input(&client, &mut app, input).await?;
+        while let Ok(event) = input_rx.try_recv() {
+            if let Some(input) = app.apply_terminal_event(event, &areas) {
+                handle_input(&client, &mut app, input).await?;
+            }
         }
         while let Ok(event) = ui_rx.try_recv() {
             apply_event(&mut app, event);
