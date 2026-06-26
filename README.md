@@ -2,6 +2,9 @@
 
 A specialized IRC client for downloading books via DCC file transfers. Built with Rust and tokio for concurrent, non-blocking operations.
 
+<img width="1920" height="1180" alt="airc" src="https://github.com/user-attachments/assets/cf8351bb-512d-4252-ae21-7030a61d0b9e" />
+
+
 ## Features
 
 - **IRC Protocol**: Connect, authenticate, join channels, PING/PONG handling
