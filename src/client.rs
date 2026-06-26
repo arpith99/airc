@@ -155,6 +155,7 @@ pub(crate) async fn init(client: Arc<IrcClient>) -> Result<()> {
         ))
         .await?;
 
+    info!("Sent registration as {}", client.nickname);
     Ok(())
 }
 
@@ -318,6 +319,7 @@ pub(crate) fn parse_membership(line: &str) -> Option<Membership> {
 }
 
 pub(crate) async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
+    info!("Receive loop started");
     let mut message_count = 0u64;
     let mut last_heartbeat = std::time::Instant::now();
 
