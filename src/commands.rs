@@ -117,6 +117,10 @@ mod tests {
             process_command("/join", "#bookz"),
             Some("JOIN #bookz\r\n".to_string())
         );
+        assert_eq!(
+            process_command("/j", "#bookz"),
+            Some("JOIN #bookz\r\n".to_string())
+        );
         assert_eq!(process_command("/q", "#bookz"), Some("QUIT\r\n".to_string()));
         assert_eq!(
             process_command("/quit bye now", "#bookz"),

@@ -138,7 +138,8 @@ fn render_server_info(f: &mut Frame, app: &App, area: Rect) {
     let items = vec![
         ListItem::new(status),
         ListItem::new(app.current_channel.clone()),
-        ListItem::new("/join to join"),
+        ListItem::new("/j join"),
+        ListItem::new("/q quit"),
     ];
     let list = List::new(items)
         .block(block)
@@ -330,12 +331,16 @@ fn render_input_box(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_help_text(f: &mut Frame, area: Rect) {
     let help = vec![
+        Span::styled("/j", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(": join | "),
         Span::styled("/s query", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": search | "),
         Span::styled("/N", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": request | "),
         Span::styled("PgUp/PgDn/Home/End", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": scroll | "),
+        Span::styled("/q", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" or "),
         Span::styled("Ctrl+Q", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": quit"),
     ];
