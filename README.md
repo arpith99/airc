@@ -14,10 +14,26 @@ A specialized IRC client for downloading books via DCC file transfers. Built wit
 - **Configuration**: TOML config file with CLI overrides
 - **Async**: Non-blocking I/O, concurrent downloads, graceful shutdown
 - **Error Handling**: Custom error types with descriptive messages
-- **Logging**: Structured logging with colored terminal output
+- **Logging**: Structured logging routed into the TUI message pane
 - **TUI**: Full-screen ratatui interface — message/book/user panes, scrollbars, mouse, live download gauges
 
 ## Installation
+
+### Prebuilt binaries
+
+Download the latest release for your platform from the
+[releases page](https://github.com/arpith99/airc/releases/latest):
+
+- **Linux (x86_64)**: `airc-v0.1.1-x86_64-linux`
+- **Windows (x86_64)**: `airc-v0.1.1-x86_64-windows.exe`
+
+On Linux, make it executable after downloading:
+
+```bash
+chmod +x airc-v0.1.1-x86_64-linux
+```
+
+### Build from source
 
 ```bash
 cargo build --release
@@ -94,7 +110,7 @@ airc --server irc.example.com --tls --port 7000
 cargo test
 ```
 
-52 tests covering error handling, config merging, IP conversion, regex patterns, command processing, DCC task draining, and TUI state/scroll logic.
+64 tests covering error handling, config merging, IP conversion, regex patterns, command processing, DCC task draining, and TUI state/scroll/input-event logic.
 
 ## Dependencies
 
