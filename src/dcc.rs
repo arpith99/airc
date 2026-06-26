@@ -21,7 +21,11 @@ pub(crate) const SEARCHBOT_RESULTS_PREFIX: &str = "SearchBot_results";
 pub(crate) const ZIP_EXTENSION: &str = ".zip";
 
 pub(crate) static DCC_SEND_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i).*DCC SEND (?P<filename>\S+) (?P<ip>\d+) (?P<port>\d+) (?P<size>\d+)").unwrap()
+    // Filename may be bare (\S+) or double-quoted when it contains spaces.
+    Regex::new(
+        r#"(?i).*DCC SEND (?:"(?P<qfilename>[^"]+)"|(?P<filename>\S+)) (?P<ip>\d+) (?P<port>\d+) (?P<size>\d+)"#,
+    )
+    .unwrap()
 });
 
 pub(crate) async fn unzip_file(filename: &str, ui_tx: Sender<UiEvent>) -> Result<String> {
@@ -421,5 +425,43 @@ mod tests {
         assert_eq!(caps.name("ip").unwrap().as_str(), "1544743952");
         assert_eq!(caps.name("port").unwrap().as_str(), "2044");
         assert_eq!(caps.name("size").unwrap().as_str(), "807");
+    }
+
+    #[test]
+    fn test_dcc_send_quoted_filename_with_spaces() {
+        // Some bots quote filenames that contain spaces. The unquoted \S+ branch
+        // stops at the first space, so a quoted alternative is required.
+        let line = ":Oatmeal!Oatmeal@50.25.28.166 PRIVMSG bworm23183 :DCC SEND \"Brad Thor - (Scot Harvath 01) - The Lions of Lucerne.epub\" 840506534 3005 1272554";
+        let caps = DCC_SEND_RE
+            .captures(line)
+            .expect("quoted DCC SEND with spaces should match");
+        let filename = caps
+            .name("qfilename")
+            .or_else(|| caps.name("filename"))
+            .unwrap()
+            .as_str();
+        assert_eq!(
+            filename,
+            "Brad Thor - (Scot Harvath 01) - The Lions of Lucerne.epub"
+        );
+        assert_eq!(caps.name("ip").unwrap().as_str(), "840506534");
+        assert_eq!(caps.name("port").unwrap().as_str(), "3005");
+        assert_eq!(caps.name("size").unwrap().as_str(), "1272554");
+    }
+
+    #[test]
+    fn test_dcc_send_quoted_filename_unicode() {
+        // Non-ASCII characters inside a (quoted) filename must be captured intact.
+        let line = ":bot!u@h PRIVMSG me :DCC SEND \"Café Société.epub\" 2130706433 1234 5678";
+        let caps = DCC_SEND_RE
+            .captures(line)
+            .expect("unicode quoted DCC SEND should match");
+        let filename = caps
+            .name("qfilename")
+            .or_else(|| caps.name("filename"))
+            .unwrap()
+            .as_str();
+        assert_eq!(filename, "Café Société.epub");
+        assert_eq!(caps.name("size").unwrap().as_str(), "5678");
     }
 }

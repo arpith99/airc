@@ -209,8 +209,12 @@ async fn handle_dcc_send_request(client: &Arc<IrcClient>, line: &str) {
     }
 
     if let Some(caps) = DCC_SEND_RE.captures(line) {
-        // Extract captures safely - regex guarantees these exist if it matched
-        let filename = caps.name("filename").map(|m| m.as_str().to_string());
+        // Extract captures safely - regex guarantees these exist if it matched.
+        // The filename is either the quoted (qfilename) or bare (filename) group.
+        let filename = caps
+            .name("qfilename")
+            .or_else(|| caps.name("filename"))
+            .map(|m| m.as_str().to_string());
         let ip = caps.name("ip").map(|m| m.as_str().to_string());
         let port = caps.name("port").map(|m| m.as_str().to_string());
         let size = caps.name("size").map(|m| m.as_str().to_string());
