@@ -229,7 +229,11 @@ impl App {
     pub fn update_book_scroll(&mut self, viewport_height: usize) {
         let max_scroll = self.book_list.len().saturating_sub(viewport_height);
         self.book_scroll = self.book_scroll.min(max_scroll);
-        self.book_scroll_state = self.book_scroll_state.content_length(self.book_list.len());
+        self.book_scroll_state = self
+            .book_scroll_state
+            .content_length(self.book_list.len())
+            .viewport_content_length(viewport_height)
+            .position(self.book_scroll);
     }
 
     pub fn scroll_books_up(&mut self, amount: usize) {
@@ -249,7 +253,11 @@ impl App {
     pub fn update_user_scroll(&mut self, viewport_height: usize) {
         let max_scroll = self.user_list.len().saturating_sub(viewport_height);
         self.user_scroll = self.user_scroll.min(max_scroll);
-        self.user_scroll_state = self.user_scroll_state.content_length(self.user_list.len());
+        self.user_scroll_state = self
+            .user_scroll_state
+            .content_length(self.user_list.len())
+            .viewport_content_length(viewport_height)
+            .position(self.user_scroll);
     }
 
     pub fn scroll_users_up(&mut self, amount: usize) {

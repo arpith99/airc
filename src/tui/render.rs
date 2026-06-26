@@ -255,12 +255,30 @@ fn render_download_progress(f: &mut Frame, app: &App, areas: &[Rect]) {
     }
 }
 
+/// Top-of-viewport line index for the message scrollbar. The message pane's
+/// scroll counts up from the newest line (0 = bottom), so map it to a normal
+/// top-down track position: newest → bottom, oldest → top.
+pub(crate) fn message_scrollbar_position(
+    total: usize,
+    viewport: usize,
+    scroll_from_bottom: usize,
+) -> usize {
+    total
+        .saturating_sub(viewport)
+        .saturating_sub(scroll_from_bottom)
+}
+
 fn render_message_log(f: &mut Frame, app: &mut App, area: Rect) {
     let viewport = (area.height as usize).saturating_sub(2);
     app.update_max_scroll(viewport);
-    app.update_message_scrollbar();
 
     let total = app.messages.len();
+    app.message_scroll_state = app
+        .message_scroll_state
+        .content_length(total)
+        .viewport_content_length(viewport)
+        .position(message_scrollbar_position(total, viewport, app.message_scroll));
+
     let visible: &[super::app::Message] = if total == 0 {
         &[]
     } else if total <= viewport {
@@ -351,6 +369,18 @@ fn render_help_text(f: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_message_scrollbar_position_orientation() {
+        // 20 lines, 5 visible. Newest (scroll 0) sits at the bottom of the track.
+        assert_eq!(message_scrollbar_position(20, 5, 0), 15);
+        // Fully scrolled up (scroll == max_scroll 15) sits at the top.
+        assert_eq!(message_scrollbar_position(20, 5, 15), 0);
+        // Midway.
+        assert_eq!(message_scrollbar_position(20, 5, 10), 5);
+        // Content shorter than the viewport pins to the top.
+        assert_eq!(message_scrollbar_position(3, 5, 0), 0);
+    }
 
     #[test]
     fn test_visible_numbered_books_uses_absolute_index() {
