@@ -264,17 +264,55 @@ impl App {
 
     // --- Input / events ---
 
+    /// Byte offset into `self.input` for the current char-based cursor.
+    fn cursor_byte_offset(&self) -> usize {
+        self.input
+            .char_indices()
+            .nth(self.cursor_position)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len())
+    }
+
+    fn input_char_count(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    fn scroll_active_up(&mut self, amount: usize) {
+        match self.active_panel {
+            ActivePanel::Books => self.scroll_books_up(amount),
+            ActivePanel::Users => self.scroll_users_up(amount),
+            _ => self.scroll_up(amount),
+        }
+    }
+
+    fn scroll_active_down(&mut self, amount: usize) {
+        match self.active_panel {
+            ActivePanel::Books => self.scroll_books_down(amount),
+            ActivePanel::Users => self.scroll_users_down(amount),
+            _ => self.scroll_down(amount),
+        }
+    }
+
     pub fn handle_events(&mut self, areas: &Areas) -> Result<Option<String>> {
-        if event::poll(Duration::from_millis(10))? {
+        if !event::poll(Duration::from_millis(10))? {
+            return Ok(None);
+        }
+        let mut submitted = None;
+        loop {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    return Ok(self.handle_key_event(key));
+                    if let Some(line) = self.handle_key_event(key) {
+                        submitted = Some(line);
+                    }
                 }
                 Event::Mouse(mouse) => self.handle_mouse_event(mouse, areas),
                 _ => {}
             }
+            if !event::poll(Duration::from_millis(0))? {
+                break;
+            }
         }
-        Ok(None)
+        Ok(submitted)
     }
 
     /// Returns Some(line) when the user submits input with Enter.
@@ -285,19 +323,19 @@ impl App {
                 None
             }
             KeyCode::PageUp => {
-                self.scroll_up(PAGE_SCROLL_AMOUNT);
+                self.scroll_active_up(PAGE_SCROLL_AMOUNT);
                 None
             }
             KeyCode::PageDown => {
-                self.scroll_down(PAGE_SCROLL_AMOUNT);
+                self.scroll_active_down(PAGE_SCROLL_AMOUNT);
                 None
             }
             KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_up(1);
+                self.scroll_active_up(1);
                 None
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_down(1);
+                self.scroll_active_down(1);
                 None
             }
             KeyCode::Home => {
@@ -310,20 +348,23 @@ impl App {
                 None
             }
             KeyCode::Char(c) => {
-                self.input.insert(self.cursor_position, c);
+                let idx = self.cursor_byte_offset();
+                self.input.insert(idx, c);
                 self.cursor_position += 1;
                 None
             }
             KeyCode::Backspace => {
                 if self.cursor_position > 0 {
                     self.cursor_position -= 1;
-                    self.input.remove(self.cursor_position);
+                    let idx = self.cursor_byte_offset();
+                    self.input.remove(idx);
                 }
                 None
             }
             KeyCode::Delete => {
-                if self.cursor_position < self.input.len() {
-                    self.input.remove(self.cursor_position);
+                if self.cursor_position < self.input_char_count() {
+                    let idx = self.cursor_byte_offset();
+                    self.input.remove(idx);
                 }
                 None
             }
@@ -332,7 +373,7 @@ impl App {
                 None
             }
             KeyCode::Right => {
-                if self.cursor_position < self.input.len() {
+                if self.cursor_position < self.input_char_count() {
                     self.cursor_position += 1;
                 }
                 None
@@ -363,7 +404,7 @@ impl App {
                 } else if areas.input_area.contains_point(event.column, event.row) {
                     self.active_panel = ActivePanel::Input;
                     let input_x = event.column.saturating_sub(areas.input_area.x + 1);
-                    self.cursor_position = (input_x as usize).min(self.input.len());
+                    self.cursor_position = (input_x as usize).min(self.input_char_count());
                 }
             }
             MouseEventKind::ScrollDown => match self.active_panel {
@@ -460,6 +501,44 @@ mod tests {
         assert_eq!(a.downloads.len(), 1);
         assert_eq!(a.downloads[0].total_size, 200);
         assert_eq!(a.downloads[0].current_size, 0);
+    }
+
+    #[test]
+    fn test_multibyte_input_does_not_panic() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut a = app();
+        // Type a 2-byte char then an ASCII char — must not panic and must
+        // produce the correct string with the cursor after both chars.
+        a.handle_key_event(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::NONE));
+        a.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(a.input, "éx");
+        assert_eq!(a.cursor_position, 2);
+    }
+
+    #[test]
+    fn test_cursor_left_then_insert_multibyte() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut a = app();
+        for c in ['a', 'é', 'b'] {
+            a.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // cursor at end (3 chars). Move left once → between é and b. Insert 'Z'.
+        a.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        a.handle_key_event(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::NONE));
+        assert_eq!(a.input, "aéZb");
+        assert_eq!(a.cursor_position, 3);
+    }
+
+    #[test]
+    fn test_backspace_multibyte() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut a = app();
+        for c in ['a', 'é'] {
+            a.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        a.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(a.input, "a");
+        assert_eq!(a.cursor_position, 1);
     }
 
     #[test]
