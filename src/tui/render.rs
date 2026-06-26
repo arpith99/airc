@@ -146,6 +146,19 @@ fn render_server_info(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
+/// The book-list lines as shown in the pane: each prefixed with its absolute
+/// index so it matches the `/<n>` request command and stays correct while
+/// the pane is scrolled.
+pub(crate) fn visible_numbered_books(books: &[String], scroll: usize, viewport: usize) -> Vec<String> {
+    books
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport)
+        .map(|(i, b)| format!("{}: {}", i, b))
+        .collect()
+}
+
 fn render_book_list(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title("Book list")
@@ -159,13 +172,11 @@ fn render_book_list(f: &mut Frame, app: &mut App, area: Rect) {
     let viewport_height = (area.height as usize).saturating_sub(2);
     app.update_book_scroll(viewport_height);
 
-    let items: Vec<ListItem> = app
-        .book_list
-        .iter()
-        .skip(app.book_scroll)
-        .take(viewport_height)
-        .map(|b| ListItem::new(b.as_str()))
-        .collect();
+    let items: Vec<ListItem> =
+        visible_numbered_books(&app.book_list, app.book_scroll, viewport_height)
+            .into_iter()
+            .map(ListItem::new)
+            .collect();
 
     let list = List::new(items)
         .block(block)
@@ -330,4 +341,23 @@ fn render_help_text(f: &mut Frame, area: Rect) {
     ];
     let paragraph = Paragraph::new(Line::from(help)).style(Style::default().fg(Color::White));
     f.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_visible_numbered_books_uses_absolute_index() {
+        let books = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(
+            visible_numbered_books(&books, 0, 2),
+            vec!["0: a".to_string(), "1: b".to_string()]
+        );
+        // Scrolled: numbers stay absolute so `/<n>` still selects the right entry.
+        assert_eq!(
+            visible_numbered_books(&books, 1, 2),
+            vec!["1: b".to_string(), "2: c".to_string()]
+        );
+    }
 }
