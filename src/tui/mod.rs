@@ -103,15 +103,15 @@ pub(crate) async fn run(
 
     cleanup_terminal(&mut terminal)?;
 
-    // Ensure the server sees a QUIT so the write task ends and the connection
-    // closes cleanly (Ctrl+Q does not send one itself).
+    // Absorb late UI events first so in-flight DCC tasks never block on a full
+    // channel while we wait for the write task and downloads to finish.
+    tokio::spawn(async move { while ui_rx.recv().await.is_some() {} });
+
+    // Ensure the server sees a QUIT so the write task ends (Ctrl+Q sends none).
     if !app.quit_sent {
         let _ = client.send("QUIT\r\n".to_string()).await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(WRITE_DRAIN_TIMEOUT_SECS), write_handle).await;
-
-    // Absorb any late UI events so DCC tasks never block on a full channel.
-    tokio::spawn(async move { while ui_rx.recv().await.is_some() {} });
     drain_dcc_tasks(&client.dcc_tasks).await;
     Ok(())
 }
