@@ -49,6 +49,9 @@ interactive command-line interface with search capabilities and concurrent downl
 29. Download progress visibility
 30. Task tracking for graceful shutdown
 
+### Terminal User Interface
+31. Terminal user interface (ratatui) with panes, scrolling, mouse, and download progress
+
 ## Architecture
 
 ### Module Structure
@@ -59,7 +62,7 @@ src/
 ├── dcc.rs           # DCC file transfer, filename sanitization, unzip
 ├── commands.rs      # User command parsing and local search
 ├── net.rs           # Network retry with exponential backoff
-├── ui.rs            # Colored terminal output
+├── tui/             # ratatui TUI: App state, rendering, event application, log routing
 ├── error.rs         # Error types (AircError enum with From implementations)
 └── config.rs        # Configuration loading and merging
 ```
@@ -99,7 +102,7 @@ src/
 - **Networking:** tokio::net::TcpStream
 - **File Compression:** zip
 - **Regex:** regex with once_cell for compiled patterns
-- **Terminal Colors:** colored
+- **Terminal UI:** ratatui + crossterm
 - **Random Generation:** rand
 - **Date/Time:** chrono
 - **Config Paths:** directories
@@ -111,7 +114,7 @@ src/
 - Regex pattern matching tests (PING, DCC SEND, search, entry)
 - Command processing validation
 - Graceful DCC task draining on shutdown
-- 20 tests with 100% pass rate
+- 52 tests with 100% pass rate
 
 ## Design Decisions
 

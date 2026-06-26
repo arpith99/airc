@@ -12,6 +12,7 @@ A specialized IRC client for downloading books via DCC file transfers. Built wit
 - **Async**: Non-blocking I/O, concurrent downloads, graceful shutdown
 - **Error Handling**: Custom error types with descriptive messages
 - **Logging**: Structured logging with colored terminal output
+- **TUI**: Full-screen ratatui interface — message/book/user panes, scrollbars, mouse, live download gauges
 
 ## Installation
 
@@ -80,7 +81,7 @@ airc --server irc.example.com --tls --port 7000
 - **src/dcc.rs** - DCC file transfer, filename sanitization, unzip
 - **src/commands.rs** - User command parsing and local search
 - **src/net.rs** - Network retry with exponential backoff
-- **src/ui.rs** - Colored terminal output
+- **src/tui/** - ratatui TUI: App state, rendering, event application, log routing
 - **src/error.rs** - Custom error types
 - **src/config.rs** - Configuration management
 
@@ -90,7 +91,7 @@ airc --server irc.example.com --tls --port 7000
 cargo test
 ```
 
-20 tests covering error handling, config merging, IP conversion, regex patterns, command processing, and DCC task draining.
+52 tests covering error handling, config merging, IP conversion, regex patterns, command processing, DCC task draining, and TUI state/scroll logic.
 
 ## Dependencies
 
@@ -100,7 +101,8 @@ cargo test
 - clap (CLI parsing)
 - serde + toml (configuration)
 - regex + once_cell (pattern matching)
-- colored, chrono (terminal output)
+- ratatui + crossterm (terminal UI)
+- chrono (timestamps)
 
 ## License
 
