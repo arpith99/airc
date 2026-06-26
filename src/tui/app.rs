@@ -112,6 +112,10 @@ pub(crate) struct App {
 
     pub active_panel: ActivePanel,
     pub config: Config,
+
+    /// True while a NAMES reply (one or more 353 batches) is being collected,
+    /// before its terminating 366. Lets multi-line member lists accumulate.
+    names_accumulating: bool,
 }
 
 impl App {
@@ -136,6 +140,7 @@ impl App {
             user_scroll_state: ScrollbarState::default(),
             active_panel: ActivePanel::Input,
             config,
+            names_accumulating: false,
         }
     }
 
@@ -157,8 +162,26 @@ impl App {
         self.user_list.retain(|u| u != user);
     }
 
-    pub fn set_users(&mut self, users: Vec<String>) {
-        self.user_list = users;
+    /// Merge a batch of names from an RPL_NAMREPLY (353). A channel's member
+    /// list arrives across several 353 lines, so batches accumulate (deduped)
+    /// until the terminating 366; the first batch of a fresh burst clears any
+    /// stale list.
+    pub fn merge_users(&mut self, users: Vec<String>) {
+        if !self.names_accumulating {
+            self.user_list.clear();
+            self.names_accumulating = true;
+        }
+        for user in users {
+            if !self.user_list.contains(&user) {
+                self.user_list.push(user);
+            }
+        }
+    }
+
+    /// Mark the end of a NAMES burst (RPL_ENDOFNAMES, 366). The next 353 will
+    /// start a fresh member list.
+    pub fn finish_user_list(&mut self) {
+        self.names_accumulating = false;
     }
 
     pub fn add_download(&mut self, filename: String, size: u64) {
@@ -497,9 +520,40 @@ mod tests {
     #[test]
     fn test_remove_user() {
         let mut a = app();
-        a.set_users(vec!["alice".to_string(), "bob".to_string()]);
+        a.merge_users(vec!["alice".to_string(), "bob".to_string()]);
         a.remove_user("alice");
         assert_eq!(a.user_list, vec!["bob".to_string()]);
+    }
+
+    #[test]
+    fn test_user_list_accumulates_across_batches() {
+        // A single NAMES reply arrives as multiple 353 batches; they accumulate.
+        let mut a = app();
+        a.merge_users(vec!["alice".to_string(), "bob".to_string()]);
+        a.merge_users(vec!["carol".to_string()]);
+        assert_eq!(
+            a.user_list,
+            vec!["alice".to_string(), "bob".to_string(), "carol".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_user_list_dedups_within_burst() {
+        let mut a = app();
+        a.merge_users(vec!["alice".to_string()]);
+        a.merge_users(vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(a.user_list, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn test_user_list_fresh_burst_replaces_after_end() {
+        // After the 366 end-of-names, the next 353 burst (e.g. on rejoin)
+        // starts a fresh list rather than appending to the stale one.
+        let mut a = app();
+        a.merge_users(vec!["alice".to_string(), "bob".to_string()]);
+        a.finish_user_list();
+        a.merge_users(vec!["carol".to_string()]);
+        assert_eq!(a.user_list, vec!["carol".to_string()]);
     }
 
     #[test]

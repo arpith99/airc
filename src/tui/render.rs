@@ -64,12 +64,14 @@ pub(crate) fn render_ui(f: &mut Frame, app: &mut App) -> Areas {
 
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(10),
-            Constraint::Percentage(80),
-            Constraint::Percentage(10),
-        ])
+        .constraints([Constraint::Percentage(10), Constraint::Percentage(90)])
         .split(main_area);
+
+    // Left column: server info (small) on top, user list filling the rest.
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(1)])
+        .split(main_chunks[0]);
 
     let middle_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -93,11 +95,11 @@ pub(crate) fn render_ui(f: &mut Frame, app: &mut App) -> Areas {
     let areas = Areas {
         message_area: bottom_chunks[2],
         book_area: middle_chunks[0],
-        user_area: main_chunks[2],
+        user_area: left_chunks[1],
         input_area: footer_chunks[0],
     };
 
-    render_server_info(f, app, main_chunks[0]);
+    render_server_info(f, app, left_chunks[0]);
     render_book_list(f, app, areas.book_area);
     render_user_list(f, app, areas.user_area);
     render_download_progress(f, app, &bottom_chunks[0..2]);
@@ -138,8 +140,6 @@ fn render_server_info(f: &mut Frame, app: &App, area: Rect) {
     let items = vec![
         ListItem::new(status),
         ListItem::new(app.current_channel.clone()),
-        ListItem::new("/j join"),
-        ListItem::new("/q quit"),
     ];
     let list = List::new(items)
         .block(block)
@@ -353,6 +353,8 @@ fn render_help_text(f: &mut Frame, area: Rect) {
         Span::raw(": join | "),
         Span::styled("/s query", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": search | "),
+        Span::styled("/ss term", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(": filter | "),
         Span::styled("/N", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(": request | "),
         Span::styled("PgUp/PgDn/Home/End", Style::default().add_modifier(Modifier::BOLD)),
