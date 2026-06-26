@@ -1,12 +1,14 @@
 use crate::error::{AircError, Result};
 use crate::net::retry_with_backoff;
-use crate::ui::print_line;
+use crate::tui::UiEvent;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fs;
 use std::io::copy;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::fs::File;
+use tokio::sync::mpsc::Sender;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use zip::ZipArchive;
@@ -22,7 +24,16 @@ pub(crate) static DCC_SEND_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i).*DCC SEND (?P<filename>\S+) (?P<ip>\d+) (?P<port>\d+) (?P<size>\d+)").unwrap()
 });
 
-pub(crate) async fn unzip_file(filename: &str) -> Result<String> {
+pub(crate) async fn unzip_file(filename: &str, ui_tx: Sender<UiEvent>) -> Result<String> {
+    let base = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(filename)
+        .to_string();
+    let _ = ui_tx
+        .send(UiEvent::DownloadExtracting(base.clone()))
+        .await;
+
     let filename_owned = filename.to_string();
 
     // Run blocking zip operations in a separate thread pool
@@ -60,16 +71,9 @@ pub(crate) async fn unzip_file(filename: &str) -> Result<String> {
     })
     .await?;
 
-    let (outpath_str, file_size) = result?;
+    let (outpath_str, _file_size) = result?;
 
-    print_line(
-        &format!(
-            "File {} extracted to \"{}\" ({} bytes)\n",
-            filename, outpath_str, file_size,
-        ),
-        true,
-    );
-
+    let _ = ui_tx.send(UiEvent::DownloadExtracted(base)).await;
     Ok(outpath_str)
 }
 
@@ -156,6 +160,7 @@ pub(crate) async fn dcc_receive(
     download_path: &str,
     connection_timeout: u64,
     transfer_timeout: u64,
+    ui_tx: Sender<UiEvent>,
 ) -> Result<String> {
     // Convert IP if it's in DCC format (32-bit integer)
     let ip_addr = match ip.parse::<u32>() {
@@ -177,12 +182,17 @@ pub(crate) async fn dcc_receive(
         .into());
     }
 
+    let _ = ui_tx
+        .send(UiEvent::DownloadStarted {
+            filename: filename.to_string(),
+            size: file_size,
+        })
+        .await;
+
     let port_num: u16 = port
         .trim()
         .parse()
         .map_err(|e| format!("Invalid port '{}': {}", port, e))?;
-
-    print_line(&format!("Connecting to {}:{}...\n", ip_addr, port_num), true);
 
     // Connect with timeout and retry logic
     let dcc_addr = format!("{}:{}", ip_addr, port_num);
@@ -216,6 +226,9 @@ pub(crate) async fn dcc_receive(
     let mut total_bytes = 0u64;
     let mut buffer = vec![0u8; DCC_CHUNK_SIZE];
 
+    let mut last_emit = std::time::Instant::now();
+    let mut last_percent = 0u16;
+
     while total_bytes < file_size {
         let to_read = std::cmp::min(buffer.len() as u64, file_size - total_bytes) as usize;
 
@@ -238,6 +251,22 @@ pub(crate) async fn dcc_receive(
         file.write_all(&buffer[..bytes_read]).await?;
         total_bytes += bytes_read as u64;
 
+        let percent = if file_size > 0 {
+            ((total_bytes as f64 / file_size as f64) * 100.0) as u16
+        } else {
+            0
+        };
+        if percent != last_percent || last_emit.elapsed() >= Duration::from_millis(200) {
+            let _ = ui_tx
+                .send(UiEvent::DownloadProgress {
+                    filename: filename.to_string(),
+                    received: total_bytes,
+                })
+                .await;
+            last_percent = percent;
+            last_emit = std::time::Instant::now();
+        }
+
         // Send DCC ACK (total bytes received in network byte order)
         // DCC protocol uses u32 which wraps around for files >4GB
         let ack_bytes = (total_bytes as u32).to_be_bytes();
@@ -250,10 +279,9 @@ pub(crate) async fn dcc_receive(
     // Gracefully close the connection
     stream.shutdown().await?;
 
-    print_line(
-        &format!("Received file: {} ({} bytes)\n", filename, total_bytes),
-        true,
-    );
+    let _ = ui_tx
+        .send(UiEvent::DownloadCompleted(filename.to_string()))
+        .await;
     Ok(file_path.to_string_lossy().to_string())
 }
 
