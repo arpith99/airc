@@ -295,6 +295,11 @@ pub(crate) fn parse_names_reply(line: &str) -> Option<Vec<String>> {
     }
 }
 
+// Detect RPL_ENDOFNAMES (366), which terminates a NAMES reply burst.
+pub(crate) fn is_end_of_names(line: &str) -> bool {
+    line.contains(" 366 ")
+}
+
 // Parse a JOIN/PART/QUIT line into the nick that joined or left.
 pub(crate) fn parse_membership(line: &str) -> Option<Membership> {
     let rest = line.strip_prefix(':')?;
@@ -347,6 +352,8 @@ pub(crate) async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
 
         if let Some(users) = parse_names_reply(&line) {
             let _ = client.ui_tx.send(UiEvent::UserList(users)).await;
+        } else if is_end_of_names(&line) {
+            let _ = client.ui_tx.send(UiEvent::UserListEnd).await;
         } else if let Some(membership) = parse_membership(&line) {
             let event = match membership {
                 Membership::Joined(nick) => UiEvent::UserJoined(nick),
@@ -445,6 +452,17 @@ mod tests {
             ])
         );
         assert_eq!(parse_names_reply(":x PRIVMSG #c :hi"), None);
+    }
+
+    #[test]
+    fn test_is_end_of_names() {
+        assert!(is_end_of_names(
+            ":irc.example.com 366 mynick #bookz :End of /NAMES list.\r\n"
+        ));
+        assert!(!is_end_of_names(
+            ":irc.example.com 353 mynick = #bookz :alice bob\r\n"
+        ));
+        assert!(!is_end_of_names("PING :server\r\n"));
     }
 
     #[test]
