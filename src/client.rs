@@ -1,4 +1,3 @@
-use crate::commands::process_command;
 use crate::config::Config;
 use crate::dcc::{
     DCC_SEND_RE, SEARCHBOT_RESULTS_PREFIX, ZIP_EXTENSION, dcc_receive, read_lines_to_vec,
@@ -6,9 +5,8 @@ use crate::dcc::{
 };
 use crate::error::{AircError, Result};
 use crate::net::retry_with_backoff;
-use crate::ui::{print_line, print_received_line, print_sent_line};
+use crate::tui::UiEvent;
 use std::path::PathBuf;
-use std::process::exit;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -32,7 +30,7 @@ pub(crate) struct IrcClient {
     reader: Arc<tokio::sync::Mutex<BufReader<BoxedReader>>>,
     writer: Arc<tokio::sync::Mutex<BoxedWriter>>,
     sender: Sender<String>,
-    pub(crate) search_results: Arc<tokio::sync::Mutex<Vec<String>>>,
+    pub(crate) ui_tx: Sender<UiEvent>,
     pub(crate) dcc_tasks: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
 }
 
@@ -69,6 +67,7 @@ impl IrcClient {
         username: &str,
         nickname: &str,
         realname: &str,
+        ui_tx: Sender<UiEvent>,
     ) -> Result<(Arc<IrcClient>, Receiver<String>)> {
         info!("Connecting to {} ({})", config.server, config.channel);
 
@@ -125,11 +124,17 @@ impl IrcClient {
                 reader: Arc::new(tokio::sync::Mutex::new(reader)),
                 writer: Arc::new(tokio::sync::Mutex::new(writer)),
                 sender,
-                search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                ui_tx,
                 dcc_tasks: Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new())),
             }),
             receiver,
         ))
+    }
+
+    // Queue an outgoing IRC line for the write task.
+    pub(crate) async fn send(&self, message: String) -> Result<()> {
+        self.sender.send(message).await?;
+        Ok(())
     }
 }
 
@@ -155,50 +160,18 @@ pub(crate) async fn init(client: Arc<IrcClient>) -> Result<()> {
 
 pub(crate) async fn write(client: Arc<IrcClient>, mut receiver: Receiver<String>) -> Result<()> {
     while let Some(message) = receiver.recv().await {
-        print_sent_line(&message);
-
         {
             let mut writer = client.writer.lock().await;
             writer.write_all(message.as_bytes()).await?;
             writer.flush().await?;
-        } // Lock released here
+        }
 
-        // Check if this is a QUIT command (case-insensitive, no allocation)
+        // On QUIT, stop the write loop so shutdown can proceed cleanly.
         if message.len() >= 4 && message[..4].eq_ignore_ascii_case("QUIT") {
-            print_line("Exiting...\n", true);
-            // Give the server a moment to process the QUIT message.
             tokio::time::sleep(tokio::time::Duration::from_millis(QUIT_DELAY_MS)).await;
-            // Wait for any in-flight DCC downloads to finish before exiting so a
-            // /quit doesn't truncate files still being written to disk.
-            print_line("Waiting for DCC transfers to complete...\n", true);
-            drain_dcc_tasks(&client.dcc_tasks).await;
-            print_line("Goodbye!\n", true);
-            exit(0);
+            break;
         }
     }
-
-    Ok(())
-}
-
-pub(crate) async fn cli(client: Arc<IrcClient>) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
-    let mut command = String::new();
-
-    loop {
-        command.clear();
-        let bytes_read = reader.read_line(&mut command).await?;
-        if bytes_read == 0 {
-            break; // EOF
-        }
-        let trimmed = command.trim();
-
-        // Handle IRC commands (generate messages to send)
-        if let Some(message) = process_command(trimmed, &client.config.channel) {
-            client.sender.send(message).await?;
-        }
-    }
-
     Ok(())
 }
 
@@ -208,28 +181,14 @@ async fn handle_dcc_file(client: Arc<IrcClient>, fpath: String) -> Result<()> {
 
     if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
         if filename.starts_with(SEARCHBOT_RESULTS_PREFIX) && filename.ends_with(ZIP_EXTENSION) {
-            let txt_file = unzip_file(&fpath).await?;
+            let txt_file = unzip_file(&fpath, client.ui_tx.clone()).await?;
             let book_entries = read_lines_to_vec(&txt_file).await?;
-
-            // Update search results and clone for display to avoid holding lock during I/O
-            let num_results = book_entries.len();
-            let display_list = {
-                let mut results = client.search_results.lock().await;
-                *results = book_entries;
-                results.clone()
-            };
-
-            // Display without holding lock
-            for (i, book_line) in display_list.iter().enumerate() {
-                print_line(&format!("{}: {}\n", i, book_line), true);
-            }
-            print_line(
-                &format!("Loaded {} books into search results\n", num_results),
-                true,
-            );
+            let _ = client.ui_tx.send(UiEvent::BookList(book_entries)).await;
         } else {
-            // Download other files like ebooks
-            print_line(&format!("Downloaded file: {}\n", filename), true);
+            let _ = client
+                .ui_tx
+                .send(UiEvent::System(format!("Downloaded file: {}", filename)))
+                .await;
         }
     }
 
@@ -259,22 +218,12 @@ async fn handle_dcc_send_request(client: &Arc<IrcClient>, line: &str) {
         if let (Some(filename), Some(ip), Some(port), Some(size)) = (filename, ip, port, size) {
             info!("✓ DCC SEND: {}, {} bytes", filename, size);
 
-            print_line(
-                &format!("Received DCC SEND request for file: {}\n", filename),
-                true,
-            );
-            print_line(
-                &format!("IP: {}, Port: {}, Size: {} bytes\n", ip, port, size),
-                true,
-            );
-
-            // Spawn download task
             let client_clone = client.clone();
+            let ui_tx = client.ui_tx.clone();
             let download_path = client.config.download_path.clone();
             let connection_timeout = client.config.connection_timeout_secs;
             let transfer_timeout = client.config.dcc_timeout_secs;
 
-            // Track the spawned task for graceful shutdown
             let mut tasks = client.dcc_tasks.lock().await;
             tasks.spawn(async move {
                 match dcc_receive(
@@ -285,18 +234,23 @@ async fn handle_dcc_send_request(client: &Arc<IrcClient>, line: &str) {
                     &download_path,
                     connection_timeout,
                     transfer_timeout,
+                    ui_tx.clone(),
                 )
                 .await
                 {
                     Ok(fpath) => {
                         if let Err(e) = handle_dcc_file(client_clone, fpath).await {
                             warn!("Error handling DCC file: {}", e);
-                            print_line(&format!("Error handling DCC file: {}\n", e), true);
                         }
                     }
                     Err(e) => {
                         warn!("Error receiving DCC file: {}", e);
-                        print_line(&format!("Error receiving DCC file: {}\n", e), true);
+                        let _ = ui_tx
+                            .send(UiEvent::DownloadFailed {
+                                filename: filename.clone(),
+                                error: e.to_string(),
+                            })
+                            .await;
                     }
                 }
             });
@@ -380,11 +334,22 @@ pub(crate) async fn receive_loop(client: Arc<IrcClient>) -> Result<()> {
 
         if bytes_read == 0 {
             warn!("Connection closed by server (0 bytes read)");
-            break; // Connection closed
+            let _ = client.ui_tx.send(UiEvent::Disconnected).await;
+            break;
         }
 
         message_count += 1;
-        print_received_line(&line);
+        let _ = client.ui_tx.send(UiEvent::Received(line.clone())).await;
+
+        if let Some(users) = parse_names_reply(&line) {
+            let _ = client.ui_tx.send(UiEvent::UserList(users)).await;
+        } else if let Some(membership) = parse_membership(&line) {
+            let event = match membership {
+                Membership::Joined(nick) => UiEvent::UserJoined(nick),
+                Membership::Left(nick) => UiEvent::UserLeft(nick),
+            };
+            let _ = client.ui_tx.send(event).await;
+        }
 
         // Handle PING/PONG
         if let Some(pong) = create_pong_response(&line) {

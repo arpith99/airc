@@ -4,6 +4,7 @@ mod log_writer;
 mod render;
 
 pub(crate) use app::MessageType;
+pub(crate) use log_writer::UiMakeWriter;
 
 #[derive(Debug, Clone)]
 pub(crate) enum UiEvent {
@@ -61,6 +62,101 @@ pub(crate) fn apply_event(app: &mut App, event: UiEvent) {
             app.add_message_with_type("Disconnected from server".to_string(), MessageType::System);
         }
     }
+}
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::mpsc::Receiver;
+use tokio::task::JoinHandle;
+
+use crate::client::{IrcClient, drain_dcc_tasks};
+use crate::commands::{contains_ignore_case, entry_number, local_search_term, process_command};
+use crate::error::Result;
+use render::{cleanup_terminal, install_panic_hook, render_ui, setup_terminal};
+
+const RENDER_TICK_MS: u64 = 16;
+const WRITE_DRAIN_TIMEOUT_SECS: u64 = 2;
+
+/// Run the TUI render loop until the user quits or the server disconnects, then
+/// restore the terminal and drain in-flight DCC transfers.
+pub(crate) async fn run(
+    client: Arc<IrcClient>,
+    mut ui_rx: Receiver<UiEvent>,
+    write_handle: JoinHandle<Result<()>>,
+) -> Result<()> {
+    install_panic_hook();
+    let mut terminal = setup_terminal()?;
+    let mut app = App::new(client.config.clone());
+    let mut areas = app::Areas::default();
+
+    while !app.should_quit {
+        if let Some(input) = app.handle_events(&areas)? {
+            handle_input(&client, &mut app, input).await?;
+        }
+        while let Ok(event) = ui_rx.try_recv() {
+            apply_event(&mut app, event);
+        }
+        terminal.draw(|f| areas = render_ui(f, &mut app))?;
+        tokio::time::sleep(Duration::from_millis(RENDER_TICK_MS)).await;
+    }
+
+    cleanup_terminal(&mut terminal)?;
+
+    // Ensure the server sees a QUIT so the write task ends and the connection
+    // closes cleanly (Ctrl+Q does not send one itself).
+    if !app.quit_sent {
+        let _ = client.send("QUIT\r\n".to_string()).await;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(WRITE_DRAIN_TIMEOUT_SECS), write_handle).await;
+
+    // Absorb any late UI events so DCC tasks never block on a full channel.
+    tokio::spawn(async move { while ui_rx.recv().await.is_some() {} });
+    drain_dcc_tasks(&client.dcc_tasks).await;
+    Ok(())
+}
+
+async fn handle_input(client: &Arc<IrcClient>, app: &mut App, input: String) -> Result<()> {
+    app.add_message_with_type(input.clone(), MessageType::Sent);
+
+    if let Some(term) = local_search_term(&input) {
+        let matches: Vec<String> = app
+            .book_list
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| contains_ignore_case(line, term))
+            .map(|(i, line)| format!("{}: {}", i, line))
+            .collect();
+        if matches.is_empty() {
+            app.add_message_with_type(
+                format!("No results found for '{}'", term),
+                MessageType::System,
+            );
+        } else {
+            for m in matches {
+                app.add_message_with_type(m, MessageType::System);
+            }
+        }
+    } else if let Some(n) = entry_number(&input) {
+        if let Some(entry) = app.book_list.get(n).cloned() {
+            client
+                .send(format!("PRIVMSG {} :{}\r\n", app.current_channel, entry))
+                .await?;
+        } else {
+            app.add_message_with_type(
+                format!("Entry number {} not found", n),
+                MessageType::System,
+            );
+        }
+    } else if let Some(msg) = process_command(&input, &app.current_channel) {
+        let is_quit = msg.trim_start().to_uppercase().starts_with("QUIT");
+        client.send(msg).await?;
+        if is_quit {
+            app.should_quit = true;
+            app.quit_sent = true;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
