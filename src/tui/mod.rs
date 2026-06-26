@@ -3,6 +3,19 @@ mod download;
 mod log_writer;
 mod render;
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::mpsc::Receiver;
+use tokio::task::JoinHandle;
+
+use crate::client::{IrcClient, drain_dcc_tasks};
+use crate::commands::{contains_ignore_case, entry_number, local_search_term, process_command};
+use crate::error::Result;
+
+use app::App;
+use render::{cleanup_terminal, install_panic_hook, render_ui, setup_terminal};
+
 pub(crate) use app::MessageType;
 pub(crate) use log_writer::UiMakeWriter;
 
@@ -24,8 +37,6 @@ pub(crate) enum UiEvent {
     Connected,
     Disconnected,
 }
-
-use app::App;
 
 pub(crate) fn apply_event(app: &mut App, event: UiEvent) {
     match event {
@@ -64,17 +75,6 @@ pub(crate) fn apply_event(app: &mut App, event: UiEvent) {
     }
 }
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::sync::mpsc::Receiver;
-use tokio::task::JoinHandle;
-
-use crate::client::{IrcClient, drain_dcc_tasks};
-use crate::commands::{contains_ignore_case, entry_number, local_search_term, process_command};
-use crate::error::Result;
-use render::{cleanup_terminal, install_panic_hook, render_ui, setup_terminal};
-
 const RENDER_TICK_MS: u64 = 16;
 const WRITE_DRAIN_TIMEOUT_SECS: u64 = 2;
 
@@ -112,6 +112,13 @@ pub(crate) async fn run(
         let _ = client.send("QUIT\r\n".to_string()).await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(WRITE_DRAIN_TIMEOUT_SECS), write_handle).await;
+
+    // The terminal is restored, so report the wait directly if downloads are
+    // still finishing — draining blocks until every transfer completes.
+    let pending = client.dcc_tasks.lock().await.len();
+    if pending > 0 {
+        eprintln!("Waiting for {pending} in-flight download(s) to finish...");
+    }
     drain_dcc_tasks(&client.dcc_tasks).await;
     Ok(())
 }

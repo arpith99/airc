@@ -238,6 +238,7 @@ impl App {
     }
 
     pub fn scroll_books_down(&mut self, amount: usize) {
+        // Loose upper bound; the render pass re-clamps to len - viewport.
         let max_scroll = self.book_list.len().saturating_sub(1);
         self.book_scroll = (self.book_scroll + amount).min(max_scroll);
         self.book_scroll_state = self.book_scroll_state.position(self.book_scroll);
@@ -257,6 +258,7 @@ impl App {
     }
 
     pub fn scroll_users_down(&mut self, amount: usize) {
+        // Loose upper bound; the render pass re-clamps to len - viewport.
         let max_scroll = self.user_list.len().saturating_sub(1);
         self.user_scroll = (self.user_scroll + amount).min(max_scroll);
         self.user_scroll_state = self.user_scroll_state.position(self.user_scroll);
