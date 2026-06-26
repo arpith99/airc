@@ -5,20 +5,22 @@ mod dcc;
 mod error;
 mod net;
 mod tui;
-mod ui;
 
 use clap::Parser;
 use client::IrcClient;
 use config::Config;
 use error::Result;
 use rand::Rng;
-use tracing::{debug, info, warn};
-use ui::print_line;
+use tokio::sync::mpsc;
+use tracing::info;
+
+use crate::tui::{UiEvent, UiMakeWriter};
 
 // Constants
 const DEFAULT_REALNAME: &str = "Book Worm";
 const NICKNAME_PREFIX: &str = "bworm";
 const MAX_NICKNAME_SUFFIX: u32 = 99999;
+const UI_EVENT_BUFFER: usize = 256;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -44,25 +46,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing/logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
-    info!("Starting airc IRC client");
-
     let args = Args::parse();
 
-    // Load config from file, then merge with CLI args
     let config = Config::load()
         .await
-        .unwrap_or_else(|e| {
-            warn!("Failed to load config: {}, using defaults", e);
-            Config::default()
-        })
+        .unwrap_or_else(|_| Config::default())
         .merge_with_args(
             args.server,
             args.channel,
@@ -72,7 +60,21 @@ async fn main() -> Result<()> {
             args.port,
         );
 
-    debug!("Using config: {:?}", config);
+    // One channel carries every UI-bound event: logs, RX lines, downloads.
+    let (ui_tx, ui_rx) = mpsc::channel::<UiEvent>(UI_EVENT_BUFFER);
+
+    // Route tracing logs into the message pane instead of stdout.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_ansi(false)
+        .without_time()
+        .with_writer(UiMakeWriter::new(ui_tx.clone()))
+        .init();
+
+    info!("Starting airc IRC client");
 
     let (username, nickname, realname) = if let Some(ref user) = config.username {
         (user.clone(), user.clone(), user.clone())
@@ -83,7 +85,6 @@ async fn main() -> Result<()> {
             NICKNAME_PREFIX,
             rng.random_range(0..=MAX_NICKNAME_SUFFIX)
         );
-        info!("Generated random nickname: {}", random_nickname);
         (
             random_nickname.clone(),
             random_nickname.clone(),
@@ -91,29 +92,13 @@ async fn main() -> Result<()> {
         )
     };
 
-    let (client, receiver) = IrcClient::new(config, &username, &nickname, &realname).await?;
+    let (client, receiver) =
+        IrcClient::new(config, &username, &nickname, &realname, ui_tx.clone()).await?;
+    let _ = ui_tx.send(UiEvent::Connected).await;
 
-    info!("Spawning async tasks");
-    let init_task = tokio::spawn(client::init(client.clone()));
-    let write_task = tokio::spawn(client::write(client.clone(), receiver));
-    let cli_task = tokio::spawn(client::cli(client.clone()));
-    let receive_task = tokio::spawn(client::receive_loop(client.clone()));
+    let _init = tokio::spawn(client::init(client.clone()));
+    let write_handle = tokio::spawn(client::write(client.clone(), receiver));
+    let _receive = tokio::spawn(client::receive_loop(client.clone()));
 
-    let (init_result, write_result, cli_result, receive_result) =
-        tokio::join!(init_task, write_task, cli_task, receive_task);
-
-    // Propagate any errors from the tasks
-    init_result??;
-    write_result??;
-    cli_result??;
-    receive_result??;
-
-    // Wait for all DCC tasks to complete before exiting
-    info!("Main tasks completed, waiting for DCC transfers");
-    print_line("Waiting for DCC transfers to complete...\n", true);
-    client::drain_dcc_tasks(&client.dcc_tasks).await;
-    info!("All DCC transfers completed, exiting");
-    print_line("All DCC transfers completed.\n", true);
-
-    Ok(())
+    tui::run(client, ui_rx, write_handle).await
 }
